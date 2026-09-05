@@ -31,9 +31,37 @@ abigen!(
     ]"#,
 );
 
+abigen!(
+    AMPSettlement,
+    r#"[
+        {
+            "type": "function",
+            "name": "submitAsyncResult",
+            "inputs": [
+                { "name": "matchId", "type": "uint256", "internalType": "uint256" },
+                {
+                    "name": "result",
+                    "type": "tuple",
+                    "internalType": "struct AMPTypes.AsyncResult",
+                    "components": [
+                        { "name": "matchId", "type": "uint256", "internalType": "uint256" },
+                        { "name": "outcome", "type": "uint8", "internalType": "uint8" },
+                        { "name": "transcriptHash", "type": "bytes32", "internalType": "bytes32" },
+                        { "name": "signature", "type": "bytes", "internalType": "bytes" }
+                    ]
+                }
+            ],
+            "outputs": [],
+            "stateMutability": "nonpayable"
+        }
+    ]"#,
+);
+
 const FUJI_CHAIN_ID: u64 = 43113;
 const FUJI_RPC: &str = "https://api.avax-test.network/ext/bc/C/rpc";
 const CUP_ADDRESS_HEX: &str = "0x7c743c1c9ae3e7a65d030098f2249b7787d66dff";
+// Deployed + timelock-governed on Fuji (contracts/deployment-fuji.json).
+const SETTLEMENT_ADDRESS_HEX: &str = "0xc1b12a7Ffad6CeFf045064f9fE3E8879F0F3c9eD";
 
 #[derive(Debug, Deserialize)]
 struct Job {
@@ -139,6 +167,7 @@ async fn poll_once(pool: &PgPool, provider: &Arc<SignerProvider>, key_str: &str)
     let result = match job.kind.as_str() {
         "fund" => fund_job(provider, &job, key_str, pool).await,
         "finalize" => finalize_job(provider, &job, key_str, pool).await,
+        "settle_match" => settle_match_job(provider, &job, pool).await,
         other => Err(anyhow!("unknown job kind: {other}")),
     };
 
@@ -313,6 +342,84 @@ async fn finalize_job(
         .gas(400_000);
     let receipt = fin_call.send().await?.await?.context("finalize reverted")?;
     Ok((Some(tid), Some(format!("{:?}", receipt.transaction_hash))))
+}
+
+/// Settle a staked match: the amp-server (verifier) has already EIP-712-signed
+/// the AsyncResult; the relayer's job is pure submission — recover the tx,
+/// submit, confirm, and flip the match row to `settled`.
+async fn settle_match_job(
+    provider: &Arc<SignerProvider>,
+    job: &Job,
+    pool: &PgPool,
+) -> Result<(Option<i64>, Option<String>)> {
+    #[derive(Deserialize)]
+    struct SettlePayload {
+        #[serde(rename = "matchUuid")]
+        match_uuid: String,
+        #[serde(rename = "onChainMatchId")]
+        on_chain_match_id: i64,
+        #[serde(rename = "outcomeCode")]
+        outcome_code: u8,
+        #[serde(rename = "transcriptHash")]
+        transcript_hash: String,
+        signature: String,
+    }
+    let p: SettlePayload = serde_json::from_value(job.payload.clone())?;
+
+    let sig_bytes = hex::decode(p.signature.trim_start_matches("0x")).with_context(|| {
+        format!(
+            "bad signature hex ({} bytes expected 65)",
+            p.signature.len()
+        )
+    })?;
+    if sig_bytes.len() != 65 {
+        return Err(anyhow!(
+            "signature must be 65 bytes, got {}",
+            sig_bytes.len()
+        ));
+    }
+    let th_hex = p.transcript_hash.trim_start_matches("0x");
+    let th_bytes = hex::decode(th_hex).context("bad transcriptHash hex")?;
+    let mut transcript: [u8; 32] = [0u8; 32];
+    if th_bytes.len() == 32 {
+        transcript.copy_from_slice(&th_bytes);
+    } else if !th_bytes.is_empty() {
+        return Err(anyhow!(
+            "transcriptHash must be 32 bytes, got {}",
+            th_bytes.len()
+        ));
+    }
+
+    let settlement: Address = env::var("AMP_SETTLEMENT_ADDRESS")
+        .unwrap_or_else(|_| SETTLEMENT_ADDRESS_HEX.to_string())
+        .parse()?;
+    let contract = AMPSettlement::new(settlement, Arc::clone(provider));
+
+    let result = AsyncResult {
+        match_id: U256::from(p.on_chain_match_id as u64),
+        outcome: p.outcome_code,
+        transcript_hash: transcript,
+        signature: sig_bytes.into(),
+    };
+    let match_id_u256 = U256::from(p.on_chain_match_id as u64);
+
+    let call = contract
+        .submit_async_result(match_id_u256, result)
+        .gas(300_000);
+    let receipt = call
+        .send()
+        .await?
+        .await?
+        .context("submitAsyncResult reverted")?;
+    let tx_hash = format!("{:?}", receipt.transaction_hash);
+
+    // Flip the server's match row to settled so players see it immediately.
+    sqlx::query("UPDATE amp_matches SET state = 'settled', settled_at = now() WHERE id = $1::uuid")
+        .bind(&p.match_uuid)
+        .execute(pool)
+        .await?;
+
+    Ok((Some(p.on_chain_match_id), Some(tx_hash)))
 }
 
 /// Hand-rolled EIP-712 TournamentResult signature, byte-identical to the contract

@@ -7,7 +7,8 @@ import GrantBadge from "./components/GrantBadge";
 import SecurityAudits from "./components/SecurityAudits";
 import InvestorCTA from "./components/InvestorCTA";
 import TournamentShowcase from "./components/TournamentShowcase";
-import { Rocket, Coins, ShieldCheck, ChevronRight, Github, Trophy } from "lucide-react";
+import WhyAmp from "./components/WhyAmp";
+import { Rocket, Coins, ShieldCheck, Github, Trophy } from "lucide-react";
 
 export default function Home() {
   return (
@@ -31,7 +32,9 @@ export default function Home() {
           </div>
 
           <nav className="hidden md:flex gap-8 text-sm font-medium text-zinc-300">
+            <Link href="/arena" className="hover:text-white hover:text-brand-cyan transition-colors duration-300">Play Ranked</Link>
             <Link href="#features" className="hover:text-white hover:text-brand-cyan transition-colors duration-300">Features</Link>
+            <Link href="#why-amp" className="hover:text-white hover:text-brand-cyan transition-colors duration-300">Why AMP</Link>
             <Link href="#showcase" className="hover:text-white hover:text-brand-cyan transition-colors duration-300">Showcase</Link>
             <Link href="#demo" className="hover:text-white hover:text-brand-cyan transition-colors duration-300">How It Works</Link>
             <Link href="#fuji" className="hover:text-white hover:text-brand-cyan transition-colors duration-300">Prize Pools</Link>
@@ -70,7 +73,7 @@ export default function Home() {
           <GrantBadge />
 
           <h1 className="text-5xl md:text-7xl lg:text-8xl font-black tracking-tighter mb-8 leading-[1.1] uppercase drop-shadow-[0_0_30px_rgba(0,229,255,0.2)]">
-            <span className="text-brand-quaternary-cyan drop-shadow-[0_0_25px_rgba(0,229,255,0.4)]">TOURNAMENT</span><br />
+            <span className="text-brand-quaternary-cyan drop-shadow-[0_0_25px_rgba(0,229,255,0.4)]">OPEN</span><br />
             MATCHMA<span className="text-yellow-400 drop-shadow-[0_0_20px_rgba(250,204,21,0.8)]">KING</span><br />
 
             <span className="text-4xl md:text-5xl text-zinc-400 lowercase font-medium tracking-normal block my-4">for</span>
@@ -78,25 +81,25 @@ export default function Home() {
           </h1>
 
           <p className="max-w-4xl text-xl md:text-2xl text-zinc-300 mb-12 leading-relaxed font-medium">
-            Run trustless tournaments with escrowed prize pools and instant payouts. <br className="hidden md:block" />
-            <strong className="text-brand-cyan font-bold tracking-wide">AMP</strong> handles brackets, matchmaking, and verifiable settlement - <br className="hidden md:block" />
-            <span className="text-white/90">so any community can crown a champion on Avalanche.</span>
+            Real ranked matchmaking — queue up, get matched, climb the ladder. <br className="hidden md:block" />
+            <strong className="text-brand-cyan font-bold tracking-wide">AMP</strong> runs the queue, rates every player, and attests results on-chain. <br className="hidden md:block" />
+            <span className="text-white/90">Stake AVAX when it matters. Tournaments when it counts.</span>
           </p>
 
           <div className="flex flex-col sm:flex-row gap-6 mb-24">
             <Link
-              href="/setup"
+              href="/arena"
               className="px-8 py-4 rounded-sm font-bold text-black bg-brand-cyan hover:bg-white transition-all flex items-center justify-center gap-2 shadow-[0_0_30px_rgba(0,229,255,0.5)] hover:shadow-[0_0_50px_rgba(0,229,255,0.8)] hover:-translate-y-1 transform duration-300 uppercase tracking-widest text-sm border-b-4 border-brand-dark-cyan active:border-b-0 active:translate-y-1"
             >
-              <Trophy className="w-5 h-5 text-black" />
-              Host a Tournament
+              <Rocket className="w-5 h-5 text-black" />
+              Play Ranked — Free
             </Link>
             <Link
-              href="#showcase"
+              href="/setup"
               className="px-8 py-4 rounded-sm font-bold text-brand-cyan glass-panel hover:bg-brand-cyan/10 hover:border-brand-cyan/50 transition-colors flex items-center justify-center gap-2 uppercase tracking-widest text-sm border-b-4 border-transparent hover:shadow-[0_0_30px_rgba(0,229,255,0.2)]"
             >
-              See It In Action
-              <ChevronRight className="w-5 h-5 text-brand-cyan" />
+              <Trophy className="w-5 h-5 text-brand-cyan" />
+              Host a Tournament
             </Link>
           </div>
 
@@ -131,6 +134,9 @@ export default function Home() {
 
         {/* Showcase - tournament media (photos/clips) */}
         <TournamentShowcase />
+
+        {/* The three hard problems — cold start, oracle-free results, the moat */}
+        <WhyAmp />
 
         {/* Interactive Demo - the 4-step flow */}
         <MatchmakingDemo />
