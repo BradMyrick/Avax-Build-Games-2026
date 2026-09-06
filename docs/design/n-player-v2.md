@@ -65,12 +65,27 @@ deviation from the source requirements spec.
   (which caught and forced the canonicalized-summation fix in
   `glicko2_update_vs_many` — float addition is not associative; the
   accumulation order is now sorted by input bit patterns).
-- **M2 — `AMPMultiplayer.sol`**: dual-deposit escrow, payout profiles,
+- **M2 — `AMPMultiplayer.sol` (done, deployed + sourcify-verified to Fuji
+  as 0xcabf7b626172fE55d54f03c346563671AbcC77f7, manifest
+  `contracts/deployment-fuji-v2.json`)**: dual-deposit escrow, payout profiles,
   `settleMultiplayer` (bitmask + packed sigs, early popcount < K revert),
   quorum/grace/challenge state machine, bonded-verifier verdicts, slashing
   (non-signer bonds 50/50 relayer/rank-1; challenge losses 70/30
-  valid-group/treasury). Gates: gas bound at N=8, DoS-with-reverting-receiver,
-  conservation fuzz, conflicting-quorum-must-share-a-signer property.
+  valid-group/treasury). Gates all green: N=8 settlement at 152,962 gas
+  (< 250k), DoS-with-reverting-receiver isolated, conservation fuzz (256
+  runs × 128k calls) exact, terminal-drain equality. Larger sizes
+  documented: N=16 → 195,844; BR-64 → 404,021.
+  
+  Two architecture notes forced by the gates: (1) **prove-your-payout** —
+  settlement only records the ladder hash + packed economics snapshot and
+  credits the three fee recipients; every player claims by resubmitting the
+  ladder (hash-verified) and paying their own claim gas, keeping
+  settlement's storage writes constant in N. Payout profiles are therefore
+  IMMUTABLE (claims recompute tiers). (2) the first dispute-payout draft
+  double-spent non-loser stakes (refunds + ladder prizes) — the
+  conservation fuzz caught it; the corrected model funds ladder prizes
+  from stakes, refunds only bonds to non-losers, and routes loser
+  stake-value through the valid ladder's tiers.
 - **M3 — amp-server**: party sessions (leader-signed composition),
   commit-reveal queue phases, blockhash-seeded shuffle (one RPC fetch per
   formation), N-way quorum collector (120s window), death-certificate

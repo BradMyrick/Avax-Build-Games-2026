@@ -62,6 +62,7 @@ web/ (Next.js)                    amp-server (Rust)                    contracts
 | `AMPRegistry` (v1) | [`0xf6B0eA6c88c574c4BbEAdC186AAfe72C43C2cDc2`](https://testnet.snowtrace.io/address/0xf6B0eA6c88c574c4BbEAdC186AAfe72C43C2cDc2) | Escrow, game registry, fee-split config — game 0: ASYNC_VERIFIER, native AVAX |
 | `AMPSettlement` (v1) | [`0x78ec93e66255a74873d20DD62C6595A389272126`](https://testnet.snowtrace.io/address/0x78ec93e66255a74873d20DD62C6595A389272126) | Settlement: verifier-attested + RT hash-agree, fee-split router (≤800 bps total) |
 | `AMPTournamentCup` | [`0x7c743c1c9ae3e7a65d030098f2249b7787d66dff`](https://testnet.snowtrace.io/address/0x7c743c1c9ae3e7a65d030098f2249b7787d66dff) | Sponsor prize pools, EIP-712 finalization, pull-claims (unchanged) |
+| `AMPMultiplayer` (v2) | [`0xcabf7b626172fE55d54f03c346563671AbcC77f7`](https://testnet.snowtrace.io/address/0xcabf7b626172fE55d54f03c346563671AbcC77f7) | N-player escrow, K-of-N quorum settlement, prove-your-payout claims |
 
 ## The player flow
 

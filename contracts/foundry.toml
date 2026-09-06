@@ -5,6 +5,10 @@ test = "test"
 libs = ["lib"]
 evm_version = "cancun" # Required for Avalanche
 via_ir = true
+optimizer = true
+optimizer_runs = 64 # balance: keeps runtime under the 24KB limit without the runs=1 CSE hazards
+bytecode_hash = "none"
+cbor_metadata = false
 
 # Phase 1.7 — coverage profile for the `forge coverage` gate (≥90% target).
 [profile.coverage]
