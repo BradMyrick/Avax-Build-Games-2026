@@ -270,3 +270,174 @@ export function connectWs(
     ws?.close();
   };
 }
+
+// ---- N-Player Multiplayer API ---------------------------------------------
+
+export interface PartyInfo {
+  partyId: string;
+  leader: string;
+  members: { wallet: string; region: string; acceptedAt: string }[];
+  state: string;
+  inviteCode: string;
+  gameId: string;
+  rulesetId: string;
+}
+
+export interface MultiMatch {
+  matchId: string;
+  state: string;
+  lobbySize: number;
+  stakePerPlayer: number;
+  bondPerPlayer: number;
+  players: { wallet: string; index: number; rating: number; region: string }[];
+  ladder?: [string, number][];
+  signerCount: number;
+  quorumNeeded: number;
+  reportCount: number;
+  quorumUntil?: string;
+}
+
+export function createParty(gameId: string, rulesetId: string) {
+  return api<{ partyId: string; inviteCode: string; leader: string; state: string }>(
+    "/v1/parties",
+    { method: "POST", body: { game_id: gameId, ruleset_id: rulesetId } },
+  );
+}
+
+export function joinParty(inviteCode: string, region?: string) {
+  return api<{ partyId: string; members: number; state: string }>("/v1/parties/join", {
+    method: "POST",
+    body: { invite_code: inviteCode, region },
+  });
+}
+
+export function getParty(partyId: string) {
+  return api<PartyInfo>(`/v1/parties/${partyId}`);
+}
+
+export function lockParty(partyId: string) {
+  return api<{ partyId: string; state: string; lockMessage: string }>(
+    `/v1/parties/${partyId}/lock`,
+    { method: "POST" },
+  );
+}
+
+export function disbandParty(partyId: string) {
+  return api<{ disbanded: boolean }>(`/v1/parties/${partyId}/disband`, { method: "POST" });
+}
+
+export function multiCommit(
+  gameId: string,
+  commitHash: string,
+  stakeWei: number,
+  lobbySize: number,
+) {
+  return api<{ committed: boolean; committedCount: number; ready: boolean }>(
+    "/v1/multi/commit",
+    { method: "POST", body: { gameId, commitHash, stakeWei, lobbySize } },
+  );
+}
+
+export function multiReveal(gameId: string, rulesetId: string, salt: string) {
+  return api<{ revealed: boolean; revealedCount: number }>("/v1/multi/reveal", {
+    method: "POST",
+    body: { gameId, rulesetId, salt },
+  });
+}
+
+export function getMultiMatch(matchId: string) {
+  return api<MultiMatch>(`/v1/multi/${matchId}`);
+}
+
+export function multiReport(
+  matchId: string,
+  ranked: [string, number][],
+  transcriptHash: string,
+  sessionNonce: number,
+  signature: string,
+) {
+  return api<{
+    matchId: string;
+    state: string;
+    concordant?: number;
+    quorumNeeded: number;
+  }>(`/v1/multi/${matchId}/report`, {
+    method: "POST",
+    body: { ranked, transcriptHash, sessionNonce, signature },
+  });
+}
+
+export function multiClaim(matchId: string) {
+  return api<{ matchId: string; state: string; message: string }>(
+    `/v1/multi/${matchId}/claim`,
+    { method: "POST" },
+  );
+}
+
+/** Compute the commit hash: keccak256(address ‖ stake ‖ salt) — uses
+ *  the browser's keccak via ethers. */
+export async function computeCommitHash(
+  wallet: string,
+  stakeWei: number,
+  salt: string,
+): Promise<string> {
+  const { ethers } = await import("ethers");
+  const addr = ethers.getBytes(wallet);
+  const stake = ethers.toBeHex(BigInt(stakeWei), 8);
+  const saltBytes = ethers.toUtf8Bytes(salt);
+  const concatenated = ethers.concat([addr, ethers.getBytes(stake), saltBytes]);
+  return ethers.keccak256(concatenated);
+}
+
+/** Sign a MultiplayerLadder EIP-712 message. */
+export async function signLadder(params: {
+  wallet: string;
+  matchId: string;
+  gameId: string;
+  ranked: string[];
+  transcriptHash: string;
+  sessionNonce: number;
+  chainId: number;
+  contractAddress: string;
+}): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const eth = (window as any).ethereum;
+  if (!eth) throw new Error("No wallet found");
+
+  const msgParams = JSON.stringify({
+    domain: {
+      name: "AMPMultiplayer",
+      version: "1",
+      chainId: params.chainId,
+      verifyingContract: params.contractAddress,
+    },
+    message: {
+      matchId: params.matchId,
+      gameId: params.gameId,
+      rankedPlacements: params.ranked,
+      transcriptHash: params.transcriptHash,
+      sessionNonce: params.sessionNonce,
+    },
+    primaryType: "MultiplayerLadder",
+    types: {
+      EIP712Domain: [
+        { name: "name", type: "string" },
+        { name: "version", type: "string" },
+        { name: "chainId", type: "uint256" },
+        { name: "verifyingContract", type: "address" },
+      ],
+      MultiplayerLadder: [
+        { name: "matchId", type: "bytes32" },
+        { name: "gameId", type: "bytes32" },
+        { name: "rankedPlacements", type: "address[]" },
+        { name: "transcriptHash", type: "bytes32" },
+        { name: "sessionNonce", type: "uint256" },
+      ],
+    },
+  });
+
+  return eth.request({
+    method: "eth_signTypedData_v4",
+    params: [params.wallet, msgParams],
+  });
+}

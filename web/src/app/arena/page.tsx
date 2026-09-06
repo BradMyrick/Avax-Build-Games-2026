@@ -274,7 +274,7 @@ export default function ArenaPage() {
             <div className="flex flex-col">
               <span className="text-xl font-black tracking-widest uppercase">AMP Arena</span>
               <span className="text-[10px] text-zinc-400 font-medium tracking-widest uppercase">
-                Ranked matchmaking
+                1v1 · <Link href="/arena/multi" className="text-brand-cyan hover:underline">N-Player →</Link>
               </span>
             </div>
           </Link>
