@@ -28,6 +28,7 @@ alloy-signer-local = "2"
 alloy-provider = { version = "2", features = ["reqwest"] }
 alloy-contract = "2"
 alloy-sol-types = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.10"
 amp-match-core = { path = "../amp-match-core" }
 uuid = { version = "1", features = ["v4", "serde"] }

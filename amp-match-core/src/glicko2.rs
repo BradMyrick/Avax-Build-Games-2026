@@ -52,7 +52,123 @@ pub fn glicko2_update(
         return (rating, rd, volatility);
     }
 
-    let delta = v * g_phi_j * (score as f64 - e);
+    let outcome_sum = g_phi_j * (score as f64 - e);
+
+    match period_update(mu, phi, sigma, v, outcome_sum) {
+        Some((mu_new, phi_new, sigma_new)) => {
+            let new_rating_f = mu_new * SCALE + 1500.0;
+            let new_rd_f = phi_new * SCALE;
+            let new_vol_f = sigma_new;
+            if new_rating_f.is_finite() && new_rd_f.is_finite() && new_vol_f.is_finite() {
+                (new_rating_f as f32, new_rd_f as f32, new_vol_f as f32)
+            } else {
+                (rating, rd, volatility)
+            }
+        }
+        None => (rating, rd, volatility),
+    }
+}
+
+/// Update one player's rating against a **field of opponents** (N-player
+/// or team match), using the Glickman 2013 rating-period treatment of
+/// multiple simultaneous games: one aggregate `v` / `Δ` over the whole
+/// field, solved in a single volatility step. Order-independent by
+/// construction — every opponent contributes from the same pre-match
+/// profile.
+///
+/// `scores` aligns with `opponents`: the player's result (1.0/0.5/0.0)
+/// against each opponent individually. Team matches map naturally — every
+/// member of the winning team scores 1.0 against every member of the
+/// losing team, 0.5 across a draw.
+///
+/// Same safety contract as [`glicko2_update`]: any non-finite input or
+/// solver failure returns the original profile unchanged.
+pub fn glicko2_update_vs_many(
+    rating: f32,
+    rd: f32,
+    volatility: f32,
+    opponents: &[(f32, f32)],
+    scores: &[f32],
+) -> (f32, f32, f32) {
+    if opponents.len() != scores.len() || opponents.is_empty() {
+        return (rating, rd, volatility);
+    }
+    let all_finite = opponents
+        .iter()
+        .all(|(r, rdj)| (*r as f64).is_finite() && (*rdj as f64).is_finite())
+        && scores.iter().all(|s| (*s as f64).is_finite())
+        && (rating as f64).is_finite()
+        && (rd as f64).is_finite()
+        && (volatility as f64).is_finite();
+    if !all_finite || volatility <= 0.0 || rd < 0.0 {
+        return (rating, rd, volatility);
+    }
+
+    let mu = (rating as f64 - 1500.0) / SCALE;
+    let phi = rd as f64 / SCALE;
+    let sigma = volatility as f64;
+
+    // Aggregate the period: v = (sum of g^2*E*(1-E))^-1,
+    // outcome_sum = sum of g*(s-E). Float addition is not associative, so
+    // the accumulation order is CANONICALIZED (sorted by input bit
+    // patterns) before summing — this is what makes the update
+    // bit-identical under any permutation of the opponent field (the
+    // order-independence gate).
+    let mut terms: Vec<(u128, f64, f64)> = Vec::with_capacity(opponents.len());
+    for ((opp_rating, opp_rd), score) in opponents.iter().zip(scores.iter()) {
+        let mu_j = (*opp_rating as f64 - 1500.0) / SCALE;
+        let phi_j = *opp_rd as f64 / SCALE;
+        let g_j = 1.0
+            / (1.0 + 3.0 * phi_j * phi_j / (std::f64::consts::PI * std::f64::consts::PI)).sqrt();
+        let e_j = 1.0 / (1.0 + (-g_j * (mu - mu_j)).exp());
+        let key = ((opp_rating.to_bits() as u128) << 96)
+            | ((opp_rd.to_bits() as u128) << 64)
+            | score.to_bits() as u128;
+        terms.push((
+            key,
+            g_j * g_j * e_j * (1.0 - e_j),
+            g_j * (*score as f64 - e_j),
+        ));
+    }
+    terms.sort_unstable_by_key(|t| t.0);
+
+    let mut inv_v = 0.0f64;
+    let mut outcome_sum = 0.0f64;
+    for (_, v_term, s_term) in &terms {
+        inv_v += *v_term;
+        outcome_sum += *s_term;
+    }
+    if inv_v <= 0.0 || !inv_v.is_finite() || !outcome_sum.is_finite() {
+        return (rating, rd, volatility);
+    }
+    let v = 1.0 / inv_v;
+
+    match period_update(mu, phi, sigma, v, outcome_sum) {
+        Some((mu_new, phi_new, sigma_new)) => {
+            let new_rating_f = mu_new * SCALE + 1500.0;
+            let new_rd_f = phi_new * SCALE;
+            let new_vol_f = sigma_new;
+            if new_rating_f.is_finite() && new_rd_f.is_finite() && new_vol_f.is_finite() {
+                (new_rating_f as f32, new_rd_f as f32, new_vol_f as f32)
+            } else {
+                (rating, rd, volatility)
+            }
+        }
+        None => (rating, rd, volatility),
+    }
+}
+
+/// The shared Glicko-2 rating-period step (paper steps 5–7): volatility
+/// solve via the Illinois method, then φ and μ updates from the period's
+/// aggregate `v` and `outcome_sum = Δ / v`. `None` = solver failure.
+fn period_update(
+    mu: f64,
+    phi: f64,
+    sigma: f64,
+    v: f64,
+    outcome_sum: f64,
+) -> Option<(f64, f64, f64)> {
+    let delta = v * outcome_sum;
 
     let a = sigma.ln();
     let f = |x: f64| -> f64 {
@@ -73,7 +189,7 @@ pub fn glicko2_update(
             k += 1.0;
         }
         if k > MAX_GLINKO_ITERATIONS {
-            return (rating, rd, volatility);
+            return None;
         }
         a - k * TAU
     };
@@ -100,29 +216,100 @@ pub fn glicko2_update(
         }
     }
     if !a_iter.is_finite() || !b_iter.is_finite() {
-        return (rating, rd, volatility);
+        return None;
     }
     let sigma_new = ((a_iter + b_iter) / 2.0).exp();
 
     let phi_star = (phi * phi + sigma_new * sigma_new).sqrt();
-
     let phi_new = 1.0 / (1.0 / (phi_star * phi_star) + 1.0 / v).sqrt();
-    let mu_new = mu + phi_new * phi_new * g_phi_j * (score as f64 - e);
+    let mu_new = mu + phi_new * phi_new * outcome_sum;
 
-    let new_rating_f = mu_new * SCALE + 1500.0;
-    let new_rd_f = phi_new * SCALE;
-    let new_vol_f = sigma_new;
-
-    if !new_rating_f.is_finite() || !new_rd_f.is_finite() || !new_vol_f.is_finite() {
-        return (rating, rd, volatility);
-    }
-
-    (new_rating_f as f32, new_rd_f as f32, new_vol_f as f32)
+    Some((mu_new, phi_new, sigma_new))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- N-player / rating-period semantics -------------------------------
+
+    #[test]
+    fn vs_many_single_opponent_matches_pairwise_update() {
+        let single = glicko2_update(1500.0, 200.0, 0.06, 1600.0, 30.0, 0.0);
+        let many = glicko2_update_vs_many(1500.0, 200.0, 0.06, &[(1600.0, 30.0)], &[0.0]);
+        assert_eq!(single, many, "field of one == pairwise update");
+    }
+
+    #[test]
+    fn vs_many_is_order_independent() {
+        let opponents = [(1400.0, 30.0), (1700.0, 100.0), (1525.0, 60.0)];
+        let scores = [1.0, 0.0, 0.5];
+        let a = glicko2_update_vs_many(1500.0, 200.0, 0.06, &opponents, &scores);
+        let shuffled = [opponents[2], opponents[0], opponents[1]];
+        let shuffled_scores = [scores[2], scores[0], scores[1]];
+        let b = glicko2_update_vs_many(1500.0, 200.0, 0.06, &shuffled, &shuffled_scores);
+        assert_eq!(
+            a, b,
+            "one rating period => opponents contribute symmetrically"
+        );
+    }
+
+    #[test]
+    fn vs_many_win_raises_loses_lower_uncertainty() {
+        let opponents = [(1400.0, 100.0), (1450.0, 80.0), (1350.0, 120.0)];
+        let (r, rd, _) = glicko2_update_vs_many(1500.0, 350.0, 0.06, &opponents, &[1.0, 1.0, 1.0]);
+        assert!(r > 1500.0, "sweeping the field must raise rating, got {r}");
+        assert!(rd < 350.0, "playing a field must tighten uncertainty");
+    }
+
+    #[test]
+    fn vs_many_confident_field_resists_change() {
+        // Same 50/50 split against increasingly confident opposition.
+        let wide = glicko2_update_vs_many(1500.0, 200.0, 0.06, &[(1500.0, 300.0); 2], &[0.5, 0.5]);
+        let tight = glicko2_update_vs_many(1500.0, 200.0, 0.06, &[(1500.0, 30.0); 2], &[0.5, 0.5]);
+        // Draws at par: no rating move either way, but tight opposition
+        // should leave the player with MORE information (lower rd).
+        assert!((wide.0 - 1500.0).abs() < 10.0);
+        assert!((tight.0 - 1500.0).abs() < 10.0);
+        assert!(tight.1 < wide.1, "confident opponents must inform more");
+    }
+
+    #[test]
+    fn vs_many_rejects_empty_and_mismatched() {
+        let p = (1500.0, 200.0, 0.06);
+        assert_eq!(glicko2_update_vs_many(p.0, p.1, p.2, &[], &[]), p);
+        assert_eq!(
+            glicko2_update_vs_many(p.0, p.1, p.2, &[(1500.0, 30.0)], &[1.0, 1.0]),
+            p,
+            "score/opponent length mismatch returns profile unchanged"
+        );
+    }
+
+    #[test]
+    fn vs_many_nan_and_bad_vol_guards() {
+        assert!(
+            glicko2_update_vs_many(f32::NAN, 200.0, 0.06, &[(1500.0, 30.0)], &[1.0])
+                .0
+                .is_nan()
+        );
+        // Non-positive volatility echoes the *input* profile unchanged.
+        assert_eq!(
+            glicko2_update_vs_many(1500.0, 200.0, 0.0, &[(1500.0, 30.0)], &[1.0]),
+            (1500.0, 200.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn vs_many_extreme_field_no_corruption() {
+        let (r, rd, vol) = glicko2_update_vs_many(
+            1500.0,
+            200.0,
+            0.06,
+            &[(9000.0, 30.0), (200.0, 30.0), (10000.0, 350.0)],
+            &[1.0, 0.0, 0.5],
+        );
+        assert!(r.is_finite() && rd.is_finite() && vol.is_finite());
+    }
 
     #[test]
     fn win_increases_rating() {

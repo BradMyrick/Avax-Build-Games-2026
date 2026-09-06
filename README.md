@@ -1,6 +1,6 @@
 # AMP — Avalanche Matchmaking Protocol
 
-### Real ranked matchmaking for multiplayer games, with verifiable settlement on Avalanche.
+### Ranked matchmaking for multiplayer games, with verifiable settlement on Avalanche.
 
 AMP is a multiplayer matchmaking protocol. Players log in with one wallet
 signature (no gas), enter a skill-rated queue, get matched, and report the
@@ -20,16 +20,22 @@ tick; the money and attestations live on-chain.
 
 ```
 web/ (Next.js)                    amp-server (Rust)                    contracts/ (Solidity)
-  /arena — queue UI, wallet         HTTP/WS gateway (axum)                AMPRegistry + AMPSettlement
-    login, live match view          amp-match-core (pure lib:               ├─ staked matches: escrow,
-  /setup /cup /claim —                Glicko-2, rules, queue)                verifier-attested payouts,
-    tournaments (kept working)      EIP-191 challenge-response              bps rake, dispute arbitration
-        │                           EIP-712 outcome attestation           AMPTournamentCup (untouched)
-        ▼                                  │                                └─ sponsor prize cups
-  amp-server API / WS                     ▼
-        │                          Postgres (Neon) ◀── relayer_jobs ── relayer (Rust, custody)
-        ▼                          players, ratings, queue,             drains jobs, submits txs:
-  one EIP-191 signature            matches, reports                      fund | finalize | settle_match
+  /arena — QuickDraw game          HTTP/WS gateway (axum)                AMPRegistry + AMPSettlement
+  /arena/multi — parties,          amp-match-core (pure lib:               ├─ staked matches: escrow,
+    commit-reveal, ladder            Glicko-2, rules, queue,                verifier-attested payouts,
+  /docs — self-contained            parties, commitments)                  bps rake, dispute arbitration
+  /setup /cup /claim —           EIP-191 challenge-response            AMPMultiplayer (v2)
+    tournaments (kept working)    EIP-712 outcome attestation             ├─ N-player dual-deposit
+        │                         K-of-N quorum collector                 │  escrow + reporting bonds
+        ▼                         commit-reveal anti-collusion            ├─ K=⌊2N/3⌋+1 quorum settle
+  amp-server API / WS             lobby formation + blockhash shuffle     ├─ prove-your-payout claims
+        │                         rating pipeline (γ-anti-boost)          └─ studio/protocol fee split
+        ▼                                  │                             AMPTournamentCup (untouched)
+  one EIP-191 signature                   ▼                                └─ sponsor prize cups
+                                  Postgres (Neon) ◀── relayer_jobs ── relayer (Rust, custody)
+                                  players, ratings, queue,             drains jobs, submits txs:
+                                  matches, reports, parties,           fund | finalize | settle_match
+                                  commits, multi-matches, ladders      settle_multi (on-chain quorum)
 ```
 
 **Components:**
@@ -62,6 +68,7 @@ web/ (Next.js)                    amp-server (Rust)                    contracts
 | `AMPRegistry` (v1) | [`0xf6B0eA6c88c574c4BbEAdC186AAfe72C43C2cDc2`](https://testnet.snowtrace.io/address/0xf6B0eA6c88c574c4BbEAdC186AAfe72C43C2cDc2) | Escrow, game registry, fee-split config — game 0: ASYNC_VERIFIER, native AVAX |
 | `AMPSettlement` (v1) | [`0x78ec93e66255a74873d20DD62C6595A389272126`](https://testnet.snowtrace.io/address/0x78ec93e66255a74873d20DD62C6595A389272126) | Settlement: verifier-attested + RT hash-agree, fee-split router (≤800 bps total) |
 | `AMPTournamentCup` | [`0x7c743c1c9ae3e7a65d030098f2249b7787d66dff`](https://testnet.snowtrace.io/address/0x7c743c1c9ae3e7a65d030098f2249b7787d66dff) | Sponsor prize pools, EIP-712 finalization, pull-claims (unchanged) |
+| `AMPMultiplayer` (v2) | [`0xcabf7b626172fE55d54f03c346563671AbcC77f7`](https://testnet.snowtrace.io/address/0xcabf7b626172fE55d54f03c346563671AbcC77f7) | N-player escrow, K-of-N quorum settlement, prove-your-payout claims |
 
 ## The player flow
 
@@ -76,6 +83,25 @@ web/ (Next.js)                    amp-server (Rust)                    contracts
 Trust rules for reports: both agree → settled. Conflict → disputed,
 operator arbitrates. Opponent silent past the deadline → reporter's result
 stands. Nobody reports → cancelled, ratings untouched.
+
+## v2: N-player multiplayer (shipped)
+
+v2 extends AMP from 1v1 to parties, teams, FFA lobbies (4–16), and battle
+royale (16–64) with dual-deposit escrow (stake + reporting bond), K-of-N
+quorum settlement (`K = ⌊2N/3⌋+1`), early-exit death certificates,
+commit-reveal anti-collusion queueing, and payout profiles. The design
+record — decisions, invariants, and deliberate spec deviations — lives in
+[`docs/design/n-player-v2.md`](docs/design/n-player-v2.md).
+
+**What's live:** the `AMPMultiplayer` contract (deployed, sourcify-verified,
+91 forge tests + conservation fuzz gates), the full amp-server N-player
+pipeline (party sessions, commit-reveal, quorum collector, rating pipeline
+with γ-anti-boost, lobby formation, multi sweep), the `/arena/multi`
+frontend with party invite codes and interactive ladder reporting, and the
+`QuickDraw` reaction-duel demo game (real bot opponents, 230–380ms
+realistic reaction times). The relayer's `settle_multi` job submits to the
+live contract. Self-contained developer docs at
+[playwithamp.xyz/docs](https://playwithamp.xyz/docs).
 
 ## The three hard problems — and what ships for each
 
@@ -172,28 +198,6 @@ history) is fully remediated and was removed from the tree:
 | Abuse limits | Upstash sliding-window rate limits (5/30/60 per min) + 64KB body caps + array-length caps on every write route |
 | L2/L3 job leakage | `GET /api/job/[id]` returns status fields only; row provisioning moved into the relayer |
 
-## Ops notes
-
-### Wallet phishing warnings on preview deployments
-
-MetaMask (and PhishFort, its warning-list supplier) has flagged thousands of
-abused `*.vercel.app` / `*.netlify.app` preview subdomains. Wallet prompts on
-a PR preview URL can therefore show *"Continue at your own risk…"* even
-though the site is clean — the warning targets the domain's reputation, not
-the code. `playwithamp.xyz` itself is not on any list.
-
-Rules of thumb:
-- **Never share wallet-facing flows on preview URLs.** Test sign-in flows on
-  the production custom domain only.
-- If a specific subdomain got flagged (recycled preview names carry
-  scammers' history), request delisting:
-  - MetaMask: <https://support.metamask.io> (report a false positive) or
-    file an issue on `MetaMask/eth-phishing-detect`.
-  - PhishFort: open a PR against `phishfort/phishfort-lists/whitelists`.
-- Keep signature prompts human-readable and truthful — the sign-in message
-  states plainly that it is free and moves no funds
-  (`auth.rs::challenge_message`, site name via `AMP_SITE_NAME`). Opaque
-  `PREFIX:uuid` blobs are what drainer reports are made of.
 
 ## License
 

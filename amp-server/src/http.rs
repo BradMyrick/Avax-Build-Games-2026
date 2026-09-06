@@ -91,12 +91,25 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/queue/join", post(queue_join))
         .route("/v1/queue/leave", post(queue_leave))
         .route("/v1/queue/status", get(queue_status))
+        .route("/v1/queue/play-bot", post(play_bot_now))
         .route("/v1/matches/{id}/report", post(report_outcome))
         .route("/v1/matches/{id}", get(get_match))
         .route("/v1/matches/history", get(history))
         .route("/v1/admin/matches/{id}/arbitrate", post(admin_arbitrate))
         .route("/v1/matches/{id}/escrow/verify", post(escrow_verify))
         .route("/v1/players/{wallet}", get(player_profile))
+        .route("/v1/parties", post(create_party))
+        .route("/v1/parties/{id}", get(get_party))
+        .route("/v1/parties/join", post(join_party))
+        .route("/v1/parties/{id}/lock", post(lock_party))
+        .route("/v1/parties/{id}/disband", post(disband_party))
+        .route("/v1/multi/commit", post(multi_commit))
+        .route("/v1/multi/reveal", post(multi_reveal))
+        .route("/v1/multi/{id}", get(get_multi_match))
+        .route("/v1/multi/{id}/report", post(multi_report))
+        .route("/v1/multi/{id}/claim", post(multi_claim))
+        .route("/v1/multi/{id}/exit", post(submit_exit_cert))
+        .route("/v1/multi/{id}/exit/{wallet}", post(countersign_exit))
         .route("/v1/ws", get(ws_upgrade))
         .with_state(state)
 }
@@ -436,6 +449,7 @@ async fn queue_join(
             language: "en".into(),
             max_ping_ms: 150,
             enqueued_at_ms: joined_ms,
+            party_size: 1,
         },
     });
 
@@ -486,6 +500,111 @@ async fn queue_status(
         }))),
         None => Ok(Json(json!({ "queued": false }))),
     }
+}
+
+// ---- play-bot-now ----------------------------------------------------------------------
+
+/// Skip the queue wait and play a bot immediately. Leaves the queue if
+/// queued, creates a practice match, sends the match_found WS event.
+async fn play_bot_now(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+) -> ApiResult<Json<Value>> {
+    // Leave the queue if queued.
+    if let Some(t) = st
+        .store
+        .active_ticket(&wallet)
+        .await
+        .map_err(ApiError::Database)?
+    {
+        st.store
+            .cancel_ticket(t.id, &wallet)
+            .await
+            .map_err(ApiError::Database)?;
+    }
+    st.queue.leave(&wallet);
+
+    // Build the player's entry from their rating.
+    let rating = st
+        .store
+        .get_rating(&wallet, "amp-tactics", "ranked-1v1")
+        .await
+        .map_err(ApiError::Database)?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let entry = crate::queue::QueueEntry {
+        ticket_id: uuid::Uuid::new_v4(),
+        stake_wei: 0,
+        canonical_ruleset: "ranked-1v1".into(),
+        ticket: amp_match_core::PlayerTicket {
+            player_id: wallet.clone(),
+            game_id: "amp-tactics".into(),
+            ruleset_id: "ranked-1v1".into(),
+            mmr: rating.rating as f32,
+            mmr_uncertainty: rating.rating_deviation as f32,
+            region: "na".into(),
+            preferred_role: String::new(),
+            language: "en".into(),
+            max_ping_ms: 150,
+            enqueued_at_ms: now_ms,
+            party_size: 1,
+        },
+    };
+
+    // Build the house bot entry at a similar rating.
+    let mut house = crate::queue::QueueEntry {
+        ticket_id: uuid::Uuid::new_v4(),
+        stake_wei: 0,
+        canonical_ruleset: "ranked-1v1".into(),
+        ticket: entry.ticket.clone(),
+    };
+    house.ticket.player_id = st
+        .cfg
+        .house_wallet
+        .clone()
+        .map(|w| w.to_lowercase())
+        .or_else(|| {
+            st.verifier
+                .as_ref()
+                .map(|v| format!("{:#x}", v.address()).to_lowercase())
+        })
+        .unwrap_or_else(|| "0x0000000000000000000000000000000000000000".into());
+
+    let m = st
+        .matches
+        .create_match("amp-tactics", "ranked-1v1", &entry, &house, true)
+        .await?;
+    st.live_matches
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    // Send the match_found event with bot flag.
+    let bot_wallet = house.ticket.player_id.clone();
+    st.hub.send(
+        &wallet,
+        "match_found",
+        serde_json::json!({
+            "matchId": m.id.to_string(),
+            "gameId": m.game_id,
+            "rulesetId": m.ruleset_id,
+            "bot": true,
+            "opponent": {
+                "wallet": bot_wallet,
+                "rating": entry.ticket.mmr,
+                "region": "house",
+            },
+            "yourRating": entry.ticket.mmr,
+            "expiresAt": m.expires_at.to_rfc3339(),
+        }),
+    );
+
+    Ok(Json(json!({
+        "matchId": m.id.to_string(),
+        "bot": true,
+        "message": "playing the house bot",
+    })))
 }
 
 // ---- matches --------------------------------------------------------------------
@@ -945,6 +1064,579 @@ async fn player_profile(
     Ok(Json(
         json!({ "wallet": wallet, "ratings": ratings, "matches": matches }),
     ))
+}
+
+// ---- parties ------------------------------------------------------------------------
+
+async fn create_party(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Json(req): Json<crate::party::CreatePartyReq>,
+) -> ApiResult<Json<Value>> {
+    let party = st
+        .store
+        .create_party(&wallet, &req.game_id, &req.ruleset_id)
+        .await?;
+    Ok(Json(json!({
+        "partyId": party.id.to_string(),
+        "inviteCode": party.invite_code,
+        "leader": party.leader,
+        "state": party.state,
+    })))
+}
+
+async fn get_party(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let party = st
+        .store
+        .get_party(id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("party not found".into()))?;
+    let is_member = party.members.iter().any(|m| m.wallet == wallet);
+    if !is_member && party.leader != wallet {
+        return Err(ApiError::Forbidden("not a party member".into()));
+    }
+    Ok(Json(json!({
+        "partyId": party.id.to_string(),
+        "leader": party.leader,
+        "members": party.members,
+        "state": party.state,
+        "inviteCode": party.invite_code,
+        "gameId": party.game_id,
+        "rulesetId": party.ruleset_id,
+    })))
+}
+
+async fn join_party(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Json(req): Json<crate::party::JoinPartyReq>,
+) -> ApiResult<Json<Value>> {
+    let party = st
+        .store
+        .join_party(
+            &req.invite_code,
+            &wallet,
+            req.region.as_deref().unwrap_or("na"),
+        )
+        .await?;
+    Ok(Json(json!({
+        "partyId": party.id.to_string(),
+        "members": party.members.len(),
+        "state": party.state,
+    })))
+}
+
+async fn lock_party(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let party = st
+        .store
+        .get_party(id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("not found".into()))?;
+    if party.leader != wallet {
+        return Err(ApiError::Forbidden("only the leader can lock".into()));
+    }
+    let locked = st.store.lock_party(id).await?;
+    let msg = crate::party::lock_message(
+        &locked.id.to_string(),
+        &locked
+            .members
+            .iter()
+            .map(|m| m.wallet.as_str())
+            .collect::<Vec<_>>(),
+    );
+    Ok(Json(json!({
+        "partyId": locked.id.to_string(),
+        "state": locked.state,
+        "lockMessage": msg,
+    })))
+}
+
+async fn disband_party(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let ok = st.store.disband_party(id, &wallet).await?;
+    Ok(Json(json!({ "disbanded": ok })))
+}
+
+// ---- multiplayer commit-reveal ---------------------------------------------------------
+
+#[derive(Deserialize)]
+struct MultiCommitReq {
+    game_id: Option<String>,
+    ruleset_id: Option<String>,
+    #[serde(rename = "gameId")]
+    game_id_c: Option<String>,
+    #[serde(rename = "rulesetId")]
+    ruleset_id_c: Option<String>,
+    #[serde(rename = "commitHash")]
+    commit_hash: String,
+    #[serde(rename = "stakeWei", default)]
+    stake_wei: i64,
+    #[serde(rename = "lobbySize", default = "default_lobby")]
+    lobby_size: usize,
+}
+
+fn default_lobby() -> usize {
+    8
+}
+
+async fn multi_commit(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Json(req): Json<MultiCommitReq>,
+) -> ApiResult<Json<Value>> {
+    let game_id = req
+        .game_id
+        .or(req.game_id_c)
+        .unwrap_or_else(|| "amp-tactics".into());
+    let ruleset_id = req
+        .ruleset_id
+        .or(req.ruleset_id_c)
+        .unwrap_or_else(|| "ranked-1v1".into());
+
+    sqlx::query(
+        r#"INSERT INTO amp_commits (wallet, game_id, ruleset_id, commit_hash, stake_wei)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (wallet, game_id, ruleset_id) DO UPDATE SET
+             commit_hash = EXCLUDED.commit_hash, stake_wei = EXCLUDED.stake_wei,
+             state = 'committed', salt = NULL, revealed_at = NULL"#,
+    )
+    .bind(&wallet)
+    .bind(&game_id)
+    .bind(&ruleset_id)
+    .bind(&req.commit_hash)
+    .bind(req.stake_wei)
+    .execute(st.store.pool())
+    .await
+    .map_err(ApiError::Database)?;
+
+    // Check how many committed entries exist; if enough for a lobby, signal reveal.
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM amp_commits WHERE game_id = $1 AND ruleset_id = $2 AND state = 'committed'",
+    )
+    .bind(&game_id)
+    .bind(&ruleset_id)
+    .fetch_one(st.store.pool())
+    .await
+    .map_err(ApiError::Database)?;
+
+    Ok(Json(json!({
+        "committed": true,
+        "committedCount": count,
+        "lobbySize": req.lobby_size,
+        "ready": count >= req.lobby_size as i64,
+    })))
+}
+
+#[derive(Deserialize)]
+struct MultiRevealReq {
+    #[serde(rename = "gameId")]
+    game_id: String,
+    #[serde(rename = "rulesetId")]
+    ruleset_id: String,
+    salt: String,
+}
+
+async fn multi_reveal(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Json(req): Json<MultiRevealReq>,
+) -> ApiResult<Json<Value>> {
+    // Verify the reveal matches the commit.
+    let row = sqlx::query(
+        "SELECT commit_hash, stake_wei FROM amp_commits WHERE wallet = $1 AND game_id = $2 AND ruleset_id = $3 AND state = 'committed'",
+    )
+    .bind(&wallet)
+    .bind(&req.game_id)
+    .bind(&req.ruleset_id)
+    .fetch_optional(st.store.pool())
+    .await
+    .map_err(ApiError::Database)?
+    .ok_or_else(|| ApiError::NotFound("no active commit".into()))?;
+
+    let commit_hash: String = row.get("commit_hash");
+    let stake_wei: i64 = row.get("stake_wei");
+
+    if !crate::multiplayer::verify_commit(&commit_hash, &wallet, stake_wei, &req.salt) {
+        return Err(ApiError::BadRequest("salt does not match commit".into()));
+    }
+
+    sqlx::query(
+        "UPDATE amp_commits SET state = 'revealed', salt = $3, revealed_at = now() WHERE wallet = $1 AND game_id = $2 AND ruleset_id = $4",
+    )
+    .bind(&wallet)
+    .bind(&req.game_id)
+    .bind(&req.salt)
+    .bind(&req.ruleset_id)
+    .execute(st.store.pool())
+    .await
+    .map_err(ApiError::Database)?;
+
+    let revealed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM amp_commits WHERE game_id = $1 AND ruleset_id = $2 AND state = 'revealed'",
+    )
+    .bind(&req.game_id)
+    .bind(&req.ruleset_id)
+    .fetch_one(st.store.pool())
+    .await
+    .map_err(ApiError::Database)?;
+
+    Ok(Json(json!({
+        "revealed": true,
+        "revealedCount": revealed,
+    })))
+}
+
+async fn get_multi_match(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let m = st
+        .store
+        .get_multi_match(id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("match not found".into()))?;
+    let is_player = m.players.iter().any(|p| p.wallet == wallet);
+    if !is_player {
+        return Err(ApiError::Forbidden("not a participant".into()));
+    }
+    let reports = st.store.get_ladder_reports(id).await?;
+    Ok(Json(json!({
+        "matchId": m.id.to_string(),
+        "state": m.state,
+        "lobbySize": m.lobby_size,
+        "stakePerPlayer": m.stake_per_player,
+        "bondPerPlayer": m.bond_per_player,
+        "players": m.players.iter().map(|p| json!({
+            "wallet": p.wallet,
+            "index": p.index,
+            "rating": p.rating,
+            "region": p.region,
+        })).collect::<Vec<_>>(),
+        "ladder": m.ladder,
+        "signerCount": m.signer_mask.count_ones(),
+        "quorumNeeded": crate::multiplayer::quorum_of(m.lobby_size),
+        "reportCount": reports.len(),
+        "transcriptHash": m.transcript_hash,
+        "quorumUntil": m.quorum_until.map(|q| q.to_rfc3339()),
+    })))
+}
+
+#[derive(Deserialize)]
+struct MultiReportReq {
+    ranked: Vec<(String, u16)>,
+    #[serde(rename = "transcriptHash")]
+    transcript_hash: String,
+    #[serde(rename = "sessionNonce")]
+    session_nonce: u64,
+    signature: String,
+}
+
+async fn multi_report(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Path(id): Path<Uuid>,
+    Json(req): Json<MultiReportReq>,
+) -> ApiResult<Json<Value>> {
+    let m = st
+        .store
+        .get_multi_match(id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("match not found".into()))?;
+    if !m.players.iter().any(|p| p.wallet == wallet) {
+        return Err(ApiError::Forbidden("not a participant".into()));
+    }
+    if m.state != "live" && m.state != "quorum" {
+        return Err(ApiError::Conflict(format!("match is {}", m.state)));
+    }
+
+    let report = crate::multiplayer::LadderReport {
+        wallet: wallet.clone(),
+        ranked: req.ranked,
+        transcript_hash: req.transcript_hash,
+        session_nonce: req.session_nonce,
+        signature: req.signature,
+    };
+
+    let inserted = st.store.insert_ladder_report(id, &report).await?;
+    if !inserted {
+        return Ok(Json(
+            json!({ "matchId": id.to_string(), "note": "already reported" }),
+        ));
+    }
+
+    // Check for concordant quorum.
+    let k = crate::multiplayer::quorum_of(m.lobby_size);
+    if let Some((_th, count, _ladder)) = st.store.concordant_quorum(id).await?
+        && count >= k
+    {
+        st.store.update_multi_state(id, "quorum").await?;
+        return Ok(Json(json!({
+            "matchId": id.to_string(),
+            "state": "quorum",
+            "concordant": count,
+            "quorumNeeded": k,
+        })));
+    }
+
+    let reports = st.store.get_ladder_reports(id).await?;
+    Ok(Json(json!({
+        "matchId": id.to_string(),
+        "state": m.state,
+        "reported": true,
+        "reportCount": reports.len(),
+        "quorumNeeded": k,
+    })))
+}
+
+async fn multi_claim(
+    State(st): State<AppState>,
+    Authed(_wallet): Authed,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let m = st
+        .store
+        .get_multi_match(id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("match not found".into()))?;
+    if m.state != "quorum" {
+        return Err(ApiError::Conflict(format!(
+            "match is {}, not quorum",
+            m.state
+        )));
+    }
+
+    let multiplayer_addr: Address = st
+        .cfg
+        .multiplayer_address
+        .as_deref()
+        .and_then(|a| a.parse().ok())
+        .ok_or_else(|| ApiError::BadRequest("multiplayer address not configured".into()))?;
+
+    let payload = crate::multiplayer::build_settle_multi_job(
+        &st.store,
+        id,
+        st.cfg.chain_id,
+        multiplayer_addr,
+    )
+    .await?;
+
+    // Enqueue the settlement job for the relayer.
+    sqlx::query("INSERT INTO relayer_jobs (kind, payload, status) VALUES ('settle_multi', $1::jsonb, 'pending')")
+        .bind(payload.to_string())
+        .execute(st.store.pool())
+        .await
+        .map_err(ApiError::Database)?;
+
+    // Apply Glicko-2 rating updates from the settled ladder.
+    let ladder: Vec<(String, u16)> = serde_json::from_value(
+        payload["rankedPlacements"]
+            .as_array()
+            .map(|arr| {
+                serde_json::Value::Array(
+                    arr.iter()
+                        .enumerate()
+                        .map(|(i, addr)| {
+                            serde_json::json!([addr.as_str().unwrap_or(""), (i + 1) as u16])
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or_default(),
+    )
+    .unwrap_or_default();
+
+    let rating_updates = crate::rating_pipeline::apply_multi_ratings(
+        &st.store,
+        id,
+        &m.game_id,
+        &m.ruleset_id,
+        &ladder,
+        0.7, // γ anti-boost (configurable via env in a future pass)
+    )
+    .await;
+
+    st.store.update_multi_state(id, "settling").await?;
+
+    // Notify every player with their personalized rating delta.
+    match rating_updates {
+        Ok(updates) => {
+            for u in &updates {
+                st.hub.send(
+                    &u.wallet,
+                    "multi_result",
+                    serde_json::json!({
+                        "matchId": id.to_string(),
+                        "outcome": {
+                            "ratingBefore": u.rating_before,
+                            "ratingAfter": u.rating_after,
+                            "delta": u.delta,
+                            "deviationAfter": u.deviation_after,
+                        },
+                    }),
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = format!("{e:#}"),
+                "rating pipeline failed (match still settles)"
+            );
+        }
+    }
+
+    Ok(Json(json!({
+        "matchId": id.to_string(),
+        "state": "settling",
+        "message": "settlement submitted",
+    })))
+}
+
+// ---- death certificates ----------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ExitCertReq {
+    #[serde(default)]
+    #[allow(dead_code)] // deserialized for API compatibility
+    wallet: String,
+    rank: u16,
+    exit_frame: u64,
+    state_hash: String,
+    signature: String,
+}
+
+/// Submit a death certificate: an eliminated player signs their rank,
+/// exit frame, and state hash, then disconnects. Survivors countersign
+/// to verify against their simulation state.
+async fn submit_exit_cert(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ExitCertReq>,
+) -> ApiResult<Json<Value>> {
+    let m = st
+        .store
+        .get_multi_match(id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("match not found".into()))?;
+    if !m.players.iter().any(|p| p.wallet == wallet) {
+        return Err(ApiError::Forbidden("not a participant".into()));
+    }
+    if m.state != "live" && m.state != "quorum" {
+        return Err(ApiError::Conflict(format!(
+            "match is {}, not live",
+            m.state
+        )));
+    }
+
+    // Verify the EIP-191 signature over the exit message.
+    let message = format!(
+        "AMP exit certificate\n\nMatch: {}\nRank: {}\nExit frame: {}\nState hash: {}\n\nThis signature is free. It certifies your elimination and unlocks your reporting bond.",
+        id, req.rank, req.exit_frame, req.state_hash
+    );
+    let recovered = crate::auth::recover_eip191(message.as_bytes(), &req.signature)
+        .map_err(|e| ApiError::BadRequest(format!("bad exit signature: {e}")))?;
+    if format!("{recovered:#x}").to_lowercase() != wallet {
+        return Err(ApiError::BadRequest(
+            "signature does not match wallet".into(),
+        ));
+    }
+
+    // Insert the certificate.
+    let res = sqlx::query(
+        r#"INSERT INTO amp_exit_certs (match_id, wallet, rank, exit_frame, state_hash, signature)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (match_id, wallet) DO NOTHING"#,
+    )
+    .bind(id)
+    .bind(&wallet)
+    .bind(req.rank as i32)
+    .bind(req.exit_frame as i64)
+    .bind(&req.state_hash)
+    .bind(&req.signature)
+    .execute(st.store.pool())
+    .await
+    .map_err(ApiError::Database)?;
+
+    Ok(Json(json!({
+        "matchId": id.to_string(),
+        "recorded": res.rows_affected() == 1,
+        "message": "exit certificate recorded — reporting bond unlockable at settlement",
+    })))
+}
+
+#[derive(Deserialize)]
+struct CountersignReq {
+    state_hash: String,
+}
+
+/// A surviving player countersigns an exit certificate, verifying the
+/// eliminated player's state hash against their own simulation.
+async fn countersign_exit(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Path((id, cert_wallet)): Path<(Uuid, String)>,
+    Json(req): Json<CountersignReq>,
+) -> ApiResult<Json<Value>> {
+    let m = st
+        .store
+        .get_multi_match(id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("match not found".into()))?;
+    if !m.players.iter().any(|p| p.wallet == wallet) {
+        return Err(ApiError::Forbidden("not a participant".into()));
+    }
+
+    // Fetch the existing certificate.
+    let row = sqlx::query(
+        "SELECT state_hash, countersigned_by FROM amp_exit_certs WHERE match_id = $1 AND wallet = $2",
+    )
+    .bind(id)
+    .bind(&cert_wallet)
+    .fetch_optional(st.store.pool())
+    .await
+    .map_err(ApiError::Database)?
+    .ok_or_else(|| ApiError::NotFound("exit certificate not found".into()))?;
+
+    let existing_hash: String = sqlx::Row::get(&row, "state_hash");
+    if existing_hash != req.state_hash {
+        return Err(ApiError::BadRequest(
+            "state hash mismatch — certificate not verified".into(),
+        ));
+    }
+
+    // Add the countersigner.
+    let mut signed_by: Vec<String> =
+        sqlx::Row::get::<Option<serde_json::Value>, _>(&row, "countersigned_by")
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+    if !signed_by.contains(&wallet) {
+        signed_by.push(wallet.clone());
+    }
+    sqlx::query("UPDATE amp_exit_certs SET countersigned_by = $3::jsonb WHERE match_id = $1 AND wallet = $2")
+        .bind(id)
+        .bind(&cert_wallet)
+        .bind(serde_json::to_string(&signed_by).unwrap())
+        .execute(st.store.pool())
+        .await
+        .map_err(ApiError::Database)?;
+
+    Ok(Json(json!({
+        "matchId": id.to_string(),
+        "certified": cert_wallet,
+        "countersigners": signed_by.len(),
+    })))
 }
 
 // ---- websocket ---------------------------------------------------------------------

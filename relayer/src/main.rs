@@ -57,6 +57,41 @@ abigen!(
     ]"#,
 );
 
+abigen!(
+    AMPMultiplayer,
+    r#"[
+        {
+            "type": "function",
+            "name": "settleMultiplayer",
+            "inputs": [
+                { "name": "matchId", "type": "bytes32", "internalType": "bytes32" },
+                { "name": "rankedPlacements", "type": "address[]", "internalType": "address[]" },
+                { "name": "transcriptHash", "type": "bytes32", "internalType": "bytes32" },
+                { "name": "sessionNonce", "type": "uint256", "internalType": "uint256" },
+                { "name": "signerBitmask", "type": "uint256", "internalType": "uint256" },
+                { "name": "packedSignatures", "type": "bytes", "internalType": "bytes" }
+            ],
+            "outputs": [],
+            "stateMutability": "nonpayable"
+        },
+        {
+            "type": "function",
+            "name": "createLobby",
+            "inputs": [
+                { "name": "matchId", "type": "bytes32", "internalType": "bytes32" },
+                { "name": "gameId", "type": "uint256", "internalType": "uint256" },
+                { "name": "lobbySize", "type": "uint64", "internalType": "uint64" },
+                { "name": "stakePerPlayer", "type": "uint256", "internalType": "uint256" },
+                { "name": "bondPerPlayer", "type": "uint256", "internalType": "uint256" },
+                { "name": "payoutProfileId", "type": "uint16", "internalType": "uint16" },
+                { "name": "escrowFillSeconds", "type": "uint64", "internalType": "uint64" }
+            ],
+            "outputs": [],
+            "stateMutability": "nonpayable"
+        }
+    ]"#,
+);
+
 mod bracket;
 
 mod config;
@@ -183,6 +218,8 @@ async fn poll_once(
         "fund" => fund_job(provider, &job, key_str, pool, cfg).await,
         "finalize" => finalize_job(provider, &job, key_str, pool, cfg).await,
         "settle_match" => settle_match_job(provider, &job, pool, cfg).await,
+        "settle_multi" => settle_multi_job(provider, &job, pool, cfg).await,
+        "create_lobby" => create_lobby_job(provider, &job, pool, cfg).await,
         other => Err(anyhow!("unknown job kind: {other}")),
     };
 
@@ -422,6 +459,218 @@ async fn finalize_job(
 /// Settle a staked match: the amp-server (verifier) has already EIP-712-signed
 /// the AsyncResult; the relayer's job is pure submission — recover the tx,
 /// submit, confirm, and flip the match row to `settled`.
+/// Create an on-chain lobby shell on AMPMultiplayer. The server enqueues
+/// this job when it forms a lobby from revealed commits; the relayer calls
+/// createLobby (permissionless, gas-only — no funds moved) and writes the
+/// deterministic on-chain match ID back to the server's match row.
+async fn create_lobby_job(
+    provider: &Arc<SignerProvider>,
+    job: &Job,
+    pool: &PgPool,
+    cfg: &Arc<Config>,
+) -> Result<(Option<i64>, Option<String>)> {
+    #[derive(Deserialize)]
+    struct CreateLobbyPayload {
+        #[serde(rename = "matchUuid")]
+        match_uuid: String,
+        #[serde(rename = "matchIdBytes")]
+        match_id_bytes: String,
+        #[serde(rename = "gameId")]
+        game_id: u64,
+        lobby_size: u64,
+        stake_per_player: String,
+        bond_per_player: String,
+        payout_profile_id: u16,
+        escrow_fill_seconds: u64,
+    }
+    let p: CreateLobbyPayload = serde_json::from_value(job.payload.clone())?;
+
+    let contract_addr: Address = cfg
+        .multiplayer_address
+        .as_deref()
+        .and_then(|a| a.parse().ok())
+        .ok_or_else(|| anyhow!("AMP_MULTIPLAYER_ADDRESS not configured"))?;
+
+    let match_id = {
+        let bytes =
+            hex::decode(p.match_id_bytes.trim_start_matches("0x")).context("bad matchId hex")?;
+        if bytes.len() != 32 {
+            return Err(anyhow!("matchId must be 32 bytes, got {}", bytes.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        arr
+    };
+
+    let contract = AMPMultiplayer::new(contract_addr, Arc::clone(provider));
+    let call = contract
+        .create_lobby(
+            match_id,
+            U256::from(p.game_id),
+            p.lobby_size,
+            U256::from_str_radix(&p.stake_per_player, 10)?,
+            U256::from_str_radix(&p.bond_per_player, 10)?,
+            p.payout_profile_id,
+            p.escrow_fill_seconds,
+        )
+        .gas(300_000);
+
+    let pending = call.send().await.context("send createLobby")?;
+    let receipt = pending.await?.context("createLobby reverted")?;
+    let tx_hash = format!("{:?}", receipt.transaction_hash);
+
+    // Write the on-chain match ID back to the server's match row.
+    sqlx::query(
+        "UPDATE amp_multi_matches SET on_chain_match_id = $2, state = 'escrow' WHERE id = $1::uuid",
+    )
+    .bind(&p.match_uuid)
+    .bind(p.game_id as i64) // on-chain match id is derived from the bytes
+    .execute(pool)
+    .await?;
+
+    info!(tx = %tx_hash, match_uuid = %p.match_uuid, "createLobby confirmed on-chain");
+    Ok((Some(p.game_id as i64), Some(tx_hash)))
+}
+
+/// Settle an N-player multiplayer match: the amp-server has already
+/// collected and verified a K-of-N concordant quorum of EIP-712 ladder
+/// signatures; the relayer's job is pure submission to AMPMultiplayer.
+async fn settle_multi_job(
+    provider: &Arc<SignerProvider>,
+    job: &Job,
+    pool: &PgPool,
+    cfg: &Arc<Config>,
+) -> Result<(Option<i64>, Option<String>)> {
+    #[derive(Deserialize)]
+    struct SettleMultiPayload {
+        #[serde(rename = "matchUuid")]
+        match_uuid: String,
+        #[serde(rename = "onChainMatchId")]
+        on_chain_match_id: i64,
+        #[serde(rename = "rankedPlacements")]
+        ranked_placements: Vec<String>,
+        #[serde(rename = "transcriptHash")]
+        transcript_hash: String,
+        #[serde(rename = "sessionNonce")]
+        session_nonce: u64,
+        #[serde(rename = "signerBitmask")]
+        signer_bitmask: String,
+        #[serde(rename = "packedSignatures")]
+        packed_signatures: String,
+    }
+    let p: SettleMultiPayload = serde_json::from_value(job.payload.clone())?;
+
+    let contract_addr: Address = cfg
+        .multiplayer_address
+        .as_deref()
+        .and_then(|a| a.parse().ok())
+        .ok_or_else(|| anyhow!("AMP_MULTIPLAYER_ADDRESS not configured"))?;
+
+    // Parse the ranked placements.
+    let ranked: Vec<Address> = p
+        .ranked_placements
+        .iter()
+        .map(|s| s.parse::<Address>())
+        .collect::<Result<Vec<_>, _>>()
+        .context("bad ranked placements")?;
+
+    // Parse the signer bitmask (hex string like "0x3f").
+    let signer_mask = u64::from_str_radix(p.signer_bitmask.trim_start_matches("0x"), 16)
+        .context("bad signer bitmask")?;
+
+    // Parse packed signatures.
+    let sig_bytes = hex::decode(p.packed_signatures.trim_start_matches("0x"))
+        .context("bad packed signatures")?;
+    if sig_bytes.len() % 65 != 0 {
+        return Err(anyhow!(
+            "packed signatures length {} not multiple of 65",
+            sig_bytes.len()
+        ));
+    }
+
+    let tx_hash = submit_multiplayer_settlement(
+        provider,
+        &contract_addr,
+        p.on_chain_match_id as u64,
+        &ranked,
+        &p.transcript_hash,
+        p.session_nonce,
+        signer_mask,
+        &sig_bytes,
+    )
+    .await?;
+
+    // Update the server's match row.
+    sqlx::query(
+        "UPDATE amp_multi_matches SET state = 'settled', settled_at = now() WHERE id = $1::uuid",
+    )
+    .bind(&p.match_uuid)
+    .execute(pool)
+    .await?;
+
+    Ok((Some(p.on_chain_match_id), Some(tx_hash)))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submit_multiplayer_settlement(
+    provider: &Arc<SignerProvider>,
+    contract_addr: &Address,
+    on_chain_match_id: u64,
+    ranked: &[Address],
+    transcript_hash: &str,
+    session_nonce: u64,
+    signer_mask: u64,
+    sig_bytes: &[u8],
+) -> Result<String> {
+    let contract = AMPMultiplayer::new(*contract_addr, Arc::clone(provider));
+
+    // Build the matchId bytes32: the server sends a UUID as the on-chain
+    // match id — convert to a 32-byte left-padded value.
+    let match_id_bytes = {
+        let mut b = [0u8; 32];
+        b[24..].copy_from_slice(&on_chain_match_id.to_be_bytes());
+        b
+    };
+
+    let transcript: [u8; 32] = {
+        let th = hex::decode(transcript_hash.trim_start_matches("0x"))
+            .context("bad transcript hash hex")?;
+        if th.len() != 32 {
+            return Err(anyhow!(
+                "transcript hash must be 32 bytes, got {}",
+                th.len()
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&th);
+        arr
+    };
+
+    let call = contract
+        .settle_multiplayer(
+            match_id_bytes,
+            ranked.to_vec(),
+            transcript,
+            U256::from(session_nonce),
+            U256::from(signer_mask),
+            sig_bytes.to_vec().into(),
+        )
+        .gas(500_000);
+
+    let pending = call.send().await.context("send settleMultiplayer")?;
+    let receipt = pending.await?.context("settleMultiplayer reverted")?;
+
+    info!(
+        tx = format!("{:?}", receipt.transaction_hash),
+        match_id = on_chain_match_id,
+        signers = signer_mask.count_ones(),
+        ranked = ranked.len(),
+        "settleMultiplayer confirmed on-chain"
+    );
+
+    Ok(format!("{:?}", receipt.transaction_hash))
+}
+
 async fn settle_match_job(
     provider: &Arc<SignerProvider>,
     job: &Job,

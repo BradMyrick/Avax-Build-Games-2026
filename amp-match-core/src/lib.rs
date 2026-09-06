@@ -2,7 +2,8 @@
 //!
 //! Embeddable Glicko-2 matchmaking and rule-evaluation library.
 //!
-//! Pulls in **zero** server / RPC / crypto machinery — just the algorithms.
+//! Pulls in no server / RPC / async machinery — just the algorithms and
+//! (v2) `tiny-keccak` for EVM-compatible keccak256 ticket commitments.
 //! Use this if you want AMP-quality matchmaking inside your own game server,
 //! peer-to-peer game, tournament platform, or analytics tool, without running
 //! the full AMP service.
@@ -46,7 +47,7 @@
 //!     player_id: "alice".into(), game_id: "chess".into(), ruleset_id: "blitz".into(),
 //!     mmr: 1500.0, mmr_uncertainty: 200.0, region: "na".into(),
 //!     preferred_role: "white".into(), language: "en".into(),
-//!     max_ping_ms: 100, enqueued_at_ms: 0,
+//!     max_ping_ms: 100, enqueued_at_ms: 0, party_size: 1,
 //! });
 //!
 //! // Each tick, try to pair within each (game, ruleset) bucket.
@@ -71,14 +72,20 @@
 //! }
 //! ```
 
+pub mod commit;
 pub mod glicko2;
+pub mod ladder;
+pub mod party;
 pub mod queue;
 pub mod rules;
 pub mod types;
 
-pub use glicko2::glicko2_update;
+pub use commit::{shuffle_by_blockhash, ticket_commit};
+pub use glicko2::{glicko2_update, glicko2_update_vs_many};
+pub use ladder::{LadderUpdate, placement_vectors};
+pub use party::{Party, PartyError, PartySkill, recalibrate_party_deltas};
 pub use queue::{MatchOutcome, MatchQueue};
-pub use rules::{RuleEvaluationResult, evaluate_rules};
+pub use rules::{RuleEvaluationResult, evaluate_parties, evaluate_rules};
 pub use types::{
     AvoidanceParams, BackfillPolicy, ConnectionQualityParams, CustomParams, InventoryParams,
     LanguageParams, LatencyParams, MatchQualityDetail, PartyParams, PartySkillMethod,

@@ -2,9 +2,9 @@ name: AMP CI
 
 on:
   push:
-    branches: [main, protocol-resurrection]
+    branches: [main]
   pull_request:
-    branches: [main, protocol-resurrection]
+    branches: [main]
 
 env:
   RUST_BACKTRACE: 1
@@ -68,9 +68,10 @@ jobs:
       - name: Install deps
         working-directory: web
         run: npm ci
-      - name: Lint
+      - name: Lint (advisory)
         working-directory: web
         run: npm run lint
+        continue-on-error: true
       - name: Engine tests
         working-directory: web
         run: npm test

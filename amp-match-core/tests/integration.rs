@@ -17,6 +17,7 @@ fn ticket(p: &str, mmr: f32) -> PlayerTicket {
         language: "en".into(),
         max_ping_ms: 150,
         enqueued_at_ms: 0,
+        party_size: 1,
     }
 }
 

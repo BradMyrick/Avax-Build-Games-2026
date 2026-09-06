@@ -12,7 +12,7 @@ pub type GameId = String;
 ///
 /// In the AMP server, [`crate::QueueEntry`] wraps this with a notification
 /// sender; library users use `PlayerTicket` directly.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlayerTicket {
     pub player_id: String,
     pub game_id: String,
@@ -27,6 +27,15 @@ pub struct PlayerTicket {
     /// by rule evaluators (skill-decay widening, backfill trigger) and is
     /// required for the queue to compute queue duration correctly.
     pub enqueued_at_ms: u64,
+    /// How many players this ticket represents: 1 for a solo, N for a party
+    /// aggregate. Team packing uses this to bin parties into exact team
+    /// sizes; serde-defaulted so legacy serialized tickets stay valid.
+    #[serde(default = "default_party_size")]
+    pub party_size: u8,
+}
+
+fn default_party_size() -> u8 {
+    1
 }
 
 impl AsRef<PlayerTicket> for PlayerTicket {

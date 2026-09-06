@@ -190,6 +190,258 @@ impl<T: AsRef<PlayerTicket>> MatchQueue<T> {
         None
     }
 
+    /// Free-for-all fill: assemble one match of up to `slots` entries from
+    /// the bucket. The lowest-MMR entry anchors; every additional entry
+    /// must fall inside the anchor's skill window AND pass rule evaluation
+    /// against the anchor. Returns None until `slots` compatible entries
+    /// exist (no partial FFA matches — a 5-of-8 lobby is a bad lobby).
+    ///
+    /// Team matches should use [`MatchQueue::try_match_bucket`] on party
+    /// aggregate tickets instead; FFA fill is for battle-royale-style
+    /// lobbies where everyone is everyone's opponent.
+    /// Team-vs-team formation: pack parties from the bucket into TWO teams
+    /// of exactly `team_size` players each, where a party's player count is
+    /// its `party_size`. First-fit-decreasing by party size (then MMR),
+    /// placing each party on the team with more remaining capacity.
+    ///
+    /// Passes only when:
+    /// - both teams fill to exactly `team_size` (no partial matches),
+    /// - every packed party is rule-compatible with the anchor (first entry),
+    /// - the player-weighted team ratings satisfy
+    ///   `|R_T1 − R_T2| ≤ ruleset.max_skill_diff`.
+    ///
+    /// Returns the two rosters; entries are consumed from the bucket.
+    pub fn try_match_teams(
+        &mut self,
+        key: &BucketKey,
+        ruleset: &Arc<RuleSet>,
+        team_size: usize,
+        max_active: usize,
+        current_active: usize,
+    ) -> Option<(Vec<T>, Vec<T>)> {
+        if team_size < 1 || current_active >= max_active {
+            return None;
+        }
+        let bucket = self.buckets.get_mut(key)?;
+        let total: usize = bucket.iter().map(|e| e.as_ref().party_size as usize).sum();
+        if total < team_size * 2 {
+            return None;
+        }
+
+        // Work on index order: size desc, then mmr desc (first-fit-decreasing).
+        let mut order: Vec<usize> = (0..bucket.len()).collect();
+        order.sort_by(|&a, &b| {
+            let ea = bucket[a].as_ref();
+            let eb = bucket[b].as_ref();
+            eb.party_size.cmp(&ea.party_size).then(
+                eb.mmr
+                    .partial_cmp(&ea.mmr)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+        });
+
+        let anchor_mmr = bucket[order[0]].as_ref().mmr;
+        let mut team_a: Vec<usize> = Vec::new();
+        let mut team_b: Vec<usize> = Vec::new();
+        let mut cap_a = team_size;
+        let mut cap_b = team_size;
+
+        for &ix in &order {
+            let e = &bucket[ix];
+            let t = e.as_ref();
+            let size = t.party_size as usize;
+            // Hard-constraint compatibility against the anchor party.
+            if ix != order[0] {
+                let result = evaluate_rules(bucket[order[0]].as_ref(), t, ruleset);
+                if !result.passes {
+                    continue;
+                }
+            }
+            // First-fit on the emptier team; ties → A (deterministic).
+            let (team, cap) = if cap_a >= size && cap_a >= cap_b {
+                (&mut team_a, &mut cap_a)
+            } else if cap_b >= size {
+                (&mut team_b, &mut cap_b)
+            } else {
+                continue;
+            };
+            *cap -= size;
+            team.push(ix);
+        }
+
+        if cap_a != 0 || cap_b != 0 {
+            return None; // could not fill exactly — no partial teams
+        }
+
+        // Player-weighted team ratings from pre-match aggregates.
+        let r_team = |idxs: &[usize]| -> f32 {
+            let (mut sum, mut n) = (0.0f32, 0usize);
+            for &ix in idxs {
+                let t = bucket[ix].as_ref();
+                sum += t.mmr * t.party_size as f32;
+                n += t.party_size as usize;
+            }
+            if n == 0 { anchor_mmr } else { sum / n as f32 }
+        };
+        let (ra, rb) = (r_team(&team_a), r_team(&team_b));
+        if (ra - rb).abs() > ruleset.max_skill_diff {
+            return None;
+        }
+
+        // Consume: remove highest index first.
+        let mut chosen = team_a.clone();
+        chosen.extend(team_b.iter().copied());
+        chosen.sort_unstable_by(|a, b| b.cmp(a));
+        let mut roster_a = Vec::new();
+        let mut roster_b = Vec::new();
+        for ix in chosen {
+            let e = bucket.remove(ix);
+            if team_a.contains(&ix) {
+                roster_a.push(e);
+            } else {
+                roster_b.push(e);
+            }
+        }
+        self.total_count = self
+            .total_count
+            .saturating_sub(roster_a.len() + roster_b.len());
+        Some((roster_a, roster_b))
+    }
+
+    pub fn try_match_bucket_ffa(
+        &mut self,
+        key: &BucketKey,
+        ruleset: &Arc<RuleSet>,
+        slots: usize,
+        max_active: usize,
+        current_active: usize,
+    ) -> Option<Vec<T>> {
+        if slots < 2 || current_active >= max_active {
+            return None;
+        }
+        let bucket = self.buckets.get_mut(key)?;
+        if bucket.len() < slots {
+            return None;
+        }
+
+        // Anchor = first (lowest MMR) entry.
+        let anchor = &bucket[0];
+        let anchor_mmr = anchor.as_ref().mmr;
+        let hi = anchor_mmr + ruleset.max_skill_diff;
+
+        let mut chosen: Vec<usize> = vec![0];
+        for (j, candidate) in bucket.iter().enumerate().skip(1) {
+            if chosen.len() >= slots {
+                break;
+            }
+            if candidate.as_ref().mmr > hi {
+                break; // sorted by MMR — no further fit
+            }
+            let result = evaluate_rules(anchor.as_ref(), candidate.as_ref(), ruleset);
+            if result.passes {
+                chosen.push(j);
+            }
+        }
+
+        if chosen.len() < slots {
+            return None;
+        }
+
+        // Remove chosen entries highest-index-first to keep indices valid.
+        chosen.sort_unstable_by(|a, b| b.cmp(a));
+        let mut taken = Vec::with_capacity(slots);
+        for j in chosen {
+            taken.push(bucket.remove(j));
+        }
+        self.total_count = self.total_count.saturating_sub(slots);
+        Some(taken)
+    }
+
+    /// Battle-royale drainage: fill one large lobby (16–64 players) with
+    /// **wait priority** — the longest-waiting entries board first — under
+    /// a skill window that widens with the oldest entry's wait
+    /// (`base + growth_per_sec × seconds`, clamped to `window_cap`).
+    ///
+    /// All-or-nothing on `min_players`: no partial lobbies. Each additional
+    /// entry must stay inside the expanded window of the boarding set and
+    /// pass hard constraints against the anchor (oldest entry). Returns the
+    /// roster (oldest first) or `None`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn drain_battle_royale(
+        &mut self,
+        key: &BucketKey,
+        ruleset: &Arc<RuleSet>,
+        min_players: usize,
+        max_players: usize,
+        growth_per_sec: f32,
+        window_cap: f32,
+        max_active: usize,
+        current_active: usize,
+    ) -> Option<Vec<T>> {
+        if min_players < 2 || max_players < min_players || current_active >= max_active {
+            return None;
+        }
+        let bucket = self.buckets.get_mut(key)?;
+        let players_available: usize = bucket.iter().map(|e| e.as_ref().party_size as usize).sum();
+        if players_available < min_players {
+            return None;
+        }
+
+        // Wait priority: oldest (smallest enqueued_at) first. Stable ties by
+        // current order (mmr-sorted bucket) for determinism.
+        let mut order: Vec<usize> = (0..bucket.len()).collect();
+        order.sort_by_key(|&ix| bucket[ix].as_ref().enqueued_at_ms);
+
+        let now = crate::rules::now_ms();
+        let oldest_wait_s =
+            (now.saturating_sub(bucket[order[0]].as_ref().enqueued_at_ms)) as f32 / 1000.0;
+        let window = (ruleset.max_skill_diff + growth_per_sec * oldest_wait_s).min(window_cap);
+
+        let anchor = &bucket[order[0]];
+        let anchor_mmr = anchor.as_ref().mmr;
+        let mut lo = anchor_mmr;
+        let mut hi = anchor_mmr;
+
+        let mut taken: Vec<usize> = Vec::new();
+        let mut players = 0usize;
+        for &ix in &order {
+            if players >= max_players {
+                break;
+            }
+            let t = bucket[ix].as_ref();
+            if players + t.party_size as usize > max_players {
+                continue; // party would overflow the lobby; try the next
+            }
+            if !taken.is_empty() {
+                let result = evaluate_rules(anchor.as_ref(), t, ruleset);
+                if !result.passes {
+                    continue;
+                }
+                if t.mmr < lo - window || t.mmr > hi + window {
+                    continue;
+                }
+            }
+            lo = lo.min(t.mmr);
+            hi = hi.max(t.mmr);
+            taken.push(ix);
+            players += t.party_size as usize;
+        }
+
+        if players < min_players {
+            return None;
+        }
+
+        // Consume in original order (oldest first).
+        taken.sort_unstable();
+        let mut roster = Vec::with_capacity(taken.len());
+        for ix in taken.into_iter().rev() {
+            roster.push(bucket.remove(ix));
+        }
+        roster.reverse();
+        self.total_count = self.total_count.saturating_sub(roster.len());
+        Some(roster)
+    }
+
     pub fn bucket_keys(&self) -> Vec<BucketKey> {
         self.buckets.keys().cloned().collect()
     }
@@ -219,6 +471,7 @@ mod tests {
             language: "en".into(),
             max_ping_ms: 150,
             enqueued_at_ms: 0,
+            party_size: 1,
         }
     }
 
@@ -353,5 +606,170 @@ mod tests {
                 prop_assert!(m.entry_a.player_id != m.entry_b.player_id);
             }
         }
+    }
+    // ---- free-for-all fill --------------------------------------------------
+
+    fn ffa_entry(id: &str, mmr: f32) -> PlayerTicket {
+        PlayerTicket {
+            player_id: id.into(),
+            game_id: "g".into(),
+            ruleset_id: "ffa".into(),
+            mmr,
+            mmr_uncertainty: 100.0,
+            region: "na".into(),
+            preferred_role: String::new(),
+            language: "en".into(),
+            max_ping_ms: 150,
+            enqueued_at_ms: 1_000,
+            party_size: 1,
+        }
+    }
+
+    // ---- team-vs-team packing ----------------------------------------------
+
+    fn team_entry(id: &str, mmr: f32, size: u8) -> PlayerTicket {
+        let mut t = ffa_entry(id, mmr);
+        t.ruleset_id = "teams".into();
+        t.party_size = size;
+        t
+    }
+
+    fn teams_key() -> BucketKey {
+        ("g".into(), "teams".into())
+    }
+
+    #[test]
+    fn teams_pack_exact_sizes() {
+        let mut q: MatchQueue<PlayerTicket> = MatchQueue::new();
+        let rs = RuleSet::default_arc(); // window 500
+        // 4v4 from 2 solo + 1 duo + 1 duo per team side (total 8 players).
+        for (id, mmr, size) in [
+            ("a1", 1500.0, 1u8),
+            ("a2", 1510.0, 1),
+            ("a3", 1520.0, 2),
+            ("b1", 1530.0, 2),
+            ("b2", 1540.0, 1),
+            ("b3", 1550.0, 1),
+        ] {
+            q.push(team_entry(id, mmr, size));
+        }
+        let (ta, tb) = q.try_match_teams(&teams_key(), &rs, 4, 100, 0).unwrap();
+        let size_of =
+            |v: &Vec<PlayerTicket>| v.iter().map(|t| t.party_size as usize).sum::<usize>();
+        assert_eq!(size_of(&ta), 4, "team A must be exactly 4 players");
+        assert_eq!(size_of(&tb), 4, "team B must be exactly 4 players");
+        assert_eq!(q.len(), 0);
+    }
+
+    #[test]
+    fn teams_refuse_partial_fill() {
+        let mut q: MatchQueue<PlayerTicket> = MatchQueue::new();
+        let rs = RuleSet::default_arc();
+        // 7 players of solos — cannot fill two 4-player teams.
+        for i in 0..7 {
+            q.push(team_entry(&format!("p{i}"), 1500.0 + i as f32, 1));
+        }
+        assert!(q.try_match_teams(&teams_key(), &rs, 4, 100, 0).is_none());
+        assert_eq!(q.len(), 7, "no entries consumed on failure");
+    }
+
+    #[test]
+    fn teams_enforce_rating_window() {
+        let mut q: MatchQueue<PlayerTicket> = MatchQueue::new();
+        // Window 500: two 3-player stacks 800 apart must not form.
+        let rs = crate::types::RuleSet {
+            max_skill_diff: 500.0,
+            ..Default::default()
+        }
+        .new_sorted();
+        for i in 0..3 {
+            q.push(team_entry(&format!("lo{i}"), 1400.0, 1));
+        }
+        for i in 0..3 {
+            q.push(team_entry(&format!("hi{i}"), 2200.0, 1));
+        }
+        assert!(q.try_match_teams(&teams_key(), &rs, 3, 100, 0).is_none());
+        // Same stack within window forms.
+        let mut q2: MatchQueue<PlayerTicket> = MatchQueue::new();
+        for i in 0..3 {
+            q2.push(team_entry(&format!("lo{i}"), 1400.0, 1));
+            q2.push(team_entry(&format!("hi{i}"), 1600.0, 1));
+        }
+        let (ta, tb) = q2.try_match_teams(&teams_key(), &rs, 3, 100, 0).unwrap();
+        assert_eq!(ta.len() + tb.len(), 6);
+    }
+
+    #[test]
+    fn teams_respect_party_size_capacity() {
+        let mut q: MatchQueue<PlayerTicket> = MatchQueue::new();
+        let rs = RuleSet::default_arc();
+        // Three trios = 9 players: any 2 fill 3v3 exactly, one trio left.
+        for i in 0..3 {
+            q.push(team_entry(&format!("t{i}"), 1500.0 + i as f32 * 10.0, 3));
+        }
+        let (ta, tb) = q.try_match_teams(&teams_key(), &rs, 3, 100, 0).unwrap();
+        assert_eq!(ta.len(), 1);
+        assert_eq!(tb.len(), 1);
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn ffa_fills_only_with_slots_available() {
+        let mut q: MatchQueue<PlayerTicket> = MatchQueue::new();
+        let rs = RuleSet::default_arc();
+        for i in 0..3 {
+            q.push(ffa_entry(&format!("p{i}"), 1500.0 + i as f32 * 10.0));
+        }
+        // 3 queued, 4 slots wanted → no match.
+        assert!(
+            q.try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 4, 100, 0)
+                .is_none()
+        );
+        // 2 slots → immediate match, one player left over.
+        let taken = q
+            .try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 2, 100, 0)
+            .unwrap();
+        assert_eq!(taken.len(), 2);
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn ffa_respects_skill_window() {
+        let mut q: MatchQueue<PlayerTicket> = MatchQueue::new();
+        let rs = RuleSet::default_arc(); // max_skill_diff 500
+        q.push(ffa_entry("anchor", 1500.0));
+        q.push(ffa_entry("near", 1600.0));
+        q.push(ffa_entry("far", 2600.0)); // +1100 → outside window
+        let taken = q.try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 3, 100, 0);
+        assert!(
+            taken.is_none(),
+            "far player must block the fill, not be skipped"
+        );
+        // With only compatible entries the fill completes.
+        let mut q2: MatchQueue<PlayerTicket> = MatchQueue::new();
+        q2.push(ffa_entry("anchor", 1500.0));
+        q2.push(ffa_entry("near", 1600.0));
+        q2.push(ffa_entry("near2", 1700.0));
+        let taken = q2
+            .try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 3, 100, 0)
+            .unwrap();
+        assert_eq!(taken.len(), 3);
+        assert_eq!(q2.len(), 0);
+    }
+
+    #[test]
+    fn ffa_rejects_singleton_slots_and_capacity() {
+        let mut q: MatchQueue<PlayerTicket> = MatchQueue::new();
+        let rs = RuleSet::default_arc();
+        q.push(ffa_entry("a", 1500.0));
+        q.push(ffa_entry("b", 1500.0));
+        assert!(
+            q.try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 1, 100, 0)
+                .is_none()
+        );
+        assert!(
+            q.try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 2, 1, 1)
+                .is_none()
+        );
     }
 }

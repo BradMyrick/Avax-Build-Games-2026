@@ -15,6 +15,8 @@ pub struct Config {
     pub cup_address: String,
     /// AMPSettlement address (staked-match settlement path).
     pub settlement_address: String,
+    /// AMPMultiplayer.sol address (v2 N-player escrow + quorum settlement).
+    pub multiplayer_address: Option<String>,
     /// Idle poll cadence between empty job dequeues.
     pub poll_idle_ms: u64,
     /// Backoff after a poll error.
@@ -38,6 +40,9 @@ impl Config {
                 // contracts/deployment-fuji-tournament.json
                 "0x7c743c1c9ae3e7a65d030098f2249b7787d66dff",
             )?,
+            multiplayer_address: std::env::var("AMP_MULTIPLAYER_ADDRESS")
+                .ok()
+                .filter(|a| !a.is_empty()),
             settlement_address: read_env(
                 "AMP_SETTLEMENT_ADDRESS",
                 // v1 1v1 baseline on Fuji; see contracts/deployment-fuji-v1.json

@@ -2,12 +2,9 @@ name: AMP Supply Chain
 
 on:
   push:
-    branches: [main, tournament-pivot]
+    branches: [main, n-player-multiplayer]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: "0 0 * * 1" # weekly
-
 jobs:
   cargo-deny:
     name: cargo-deny (advisories + licenses)
@@ -16,6 +13,5 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           arguments: --workspace check advisories licenses

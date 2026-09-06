@@ -5,8 +5,7 @@
 //! ```
 //!
 //! This is what pulling AMP-quality matchmaking into your own game server
-//! looks like — no Cap'n Proto, no server, no Avalanche anything. Just the
-//! rating math + queue + rule evaluation.
+//! looks like — Just the rating math + queue + rule evaluation.
 
 use amp_match_core::{MatchQueue, PlayerTicket, RuleSet, glicko2};
 use std::collections::HashMap;
@@ -93,5 +92,6 @@ fn enqueue_ticket(queue: &mut MatchQueue<PlayerTicket>, name: &str, mmr: f32) {
         language: "en".into(),
         max_ping_ms: 150,
         enqueued_at_ms: 0,
+        party_size: 1,
     });
 }

@@ -1,0 +1,34 @@
+{
+  "chain_id": 43113,
+  "chain_name": "Avalanche Fuji Testnet",
+  "version": "v2-n-player-m2",
+  "deployed_at": "2026-09-06T15:10:00Z",
+  "contracts": {
+    "AMPMultiplayer": {
+      "address": "0xcabf7b626172fE55d54f03c346563671AbcC77f7",
+      "source": "contracts/src/AMPMultiplayer.sol",
+      "verified": true,
+      "verification_provider": "sourcify (full match)",
+      "runtime_bytes": 14345,
+      "note": "N-player dual-deposit escrow + K-of-N quorum settlement + grace/dispute machine + prove-your-payout claims"
+    }
+  },
+  "configuration": {
+    "protocol_rake_bps": 100,
+    "studio_split_bps": 2000,
+    "protocol_fee_recipient": "0x95CC495dF579981d3Ffa4a8f77B93A17563E077a",
+    "relayer_fee_recipient": "0x79aDcEF0E2bdc030f5906aA80C6B50C3712c0064",
+    "payout_profiles": "game 1, profile 1 (podium 60/30/10), registered at every lobby size 2..64",
+    "dispute_verifier": "not yet set (M3 wiring)"
+  },
+  "gas_profile": {
+    "settle_N8_K6": 152962,
+    "settle_N16_K11": 195844,
+    "settle_BR64_K43": 404021,
+    "gate": "N=8 under 250k (spec \u00a76); larger sizes documented bounds",
+    "note": "prove-your-payout: settlement writes constant storage; claimers pay their own claim gas"
+  },
+  "governance_status": "OPERATOR_OWNED",
+  "governance_note": "v2 beta mirrors v1: deployer EOA owns config. Timelock + external audit precede any mainnet deployment.",
+  "deployer_disclosure": "Deployed by the AMP Fuji deployer EOA (0x95CC...077a)."
+}

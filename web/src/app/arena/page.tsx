@@ -32,6 +32,7 @@ import {
   type GameInfo,
   type PlayerRating,
 } from "@/lib/amp";
+import QuickDraw from "./components/QuickDraw";
 
 type Phase =
   | "loading"
@@ -39,6 +40,7 @@ type Phase =
   | "idle"
   | "queued"
   | "matchFound"
+  | "playing"
   | "reported"
   | "result"
   | "disputed";
@@ -167,6 +169,69 @@ export default function ArenaPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallet]);
 
+  // Bot countdown: how long until the practice bot kicks in (matches server AMP_BOT_AFTER_MS).
+  const BOT_AFTER_SECONDS = 45;
+  const [botCountdown, setBotCountdown] = useState(BOT_AFTER_SECONDS);
+
+  useEffect(() => {
+    if (phase !== "queued") {
+      setBotCountdown(BOT_AFTER_SECONDS);
+      return;
+    }
+    const t = setInterval(() => {
+      setBotCountdown((sec) => Math.max(0, sec - 1));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [phase]);
+
+  // Play bot immediately — skip the queue wait.
+  const playBotNow = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const token = storedSession()?.token;
+      const res = await fetch(`${AMP_SERVER_URL}/v1/queue/play-bot`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message || "failed to start bot match");
+      }
+      const data = await res.json();
+      setMatchView({
+        matchId: data.matchId,
+        opponent: { wallet: "house-bot", rating: 1500, region: "house" },
+        yourRating: 1500,
+        bot: true,
+      });
+      setPhase("matchFound");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not start bot match");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Game finished — auto-report the result.
+  const handleGameFinish = useCallback(
+    async (result: { won: boolean; roundsWon: number; avgReactionMs: number }) => {
+      if (!matchView) return;
+      const report = result.won ? "win" : "loss";
+      try {
+        await reportOutcome(matchView.matchId, report);
+        setPhase("reported");
+      } catch {
+        setError("failed to report result");
+        setPhase("reported");
+      }
+    },
+    [matchView],
+  );
+
   // Local wait ticker while queued.
   useEffect(() => {
     if (phase !== "queued") return;
@@ -224,19 +289,7 @@ export default function ArenaPage() {
     }
   };
 
-  const report = async (result: "win" | "loss" | "draw") => {
-    if (!matchView) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await reportOutcome(matchView.matchId, result);
-      setPhase("reported");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "report failed");
-    } finally {
-      setBusy(false);
-    }
-  };
+  // Report is handled by handleGameFinish (QuickDraw auto-reports).
 
   const playedAgain = async () => {
     setResultView(null);
@@ -306,7 +359,7 @@ export default function ArenaPage() {
             <div className="flex flex-col">
               <span className="text-xl font-black tracking-widest uppercase">AMP Arena</span>
               <span className="text-[10px] text-zinc-400 font-medium tracking-widest uppercase">
-                Ranked matchmaking
+                1v1 · <Link href="/arena/multi" className="text-brand-cyan hover:underline">N-Player →</Link>
               </span>
             </div>
           </Link>
@@ -525,39 +578,68 @@ export default function ArenaPage() {
           </div>
         )}
 
-        {/* Queued */}
+        {/* Queued — waiting for a real opponent, bot countdown ticking */}
         {phase === "queued" && (
           <div className="glass-panel rounded-3xl border border-brand-cyan/20 p-10 text-center">
-            <div className="w-20 h-20 mx-auto mb-8 rounded-full border-2 border-brand-cyan/30 border-t-brand-cyan animate-spin" />
+            <div className="w-20 h-20 mx-auto mb-6 rounded-full border-2 border-brand-cyan/30 border-t-brand-cyan animate-spin" />
             <h2 className="text-3xl font-black font-mono mb-2">
               {fmtWait(queueStats.waitedMs)}
             </h2>
-            <p className="text-zinc-400 mb-6">
-              in queue · {queueStats.depth} player{queueStats.depth === 1 ? "" : "s"} total ·
+            <p className="text-zinc-400 mb-2">
+              {queueStats.depth > 1
+                ? `${queueStats.depth} players in queue — matching…`
+                : "Waiting for an opponent…"}
+            </p>
+            <p className="text-xs text-zinc-500 mb-6">
               skill window ±{Math.round(queueStats.skillWindow)}
             </p>
-            <p className="text-xs text-zinc-500 mb-8 max-w-sm mx-auto">
-              The matchmaker widens your skill window the longer you wait —
-              tight games first, fair games eventually. Empty lobby? A
-              practice bot picks you up so you&apos;re never stuck waiting.
-            </p>
-            <button
-              onClick={leave}
-              disabled={busy}
-              className="inline-flex items-center gap-2 border border-white/15 hover:border-brand-red/50 hover:text-red-200 text-zinc-300 px-6 py-3 rounded-2xl transition-colors"
-            >
-              <CircleStop className="w-4 h-4" /> Leave queue
-            </button>
+
+            {/* Bot countdown */}
+            <div className={`rounded-2xl border px-6 py-4 mb-6 transition-colors ${botCountdown <= 10 ? "border-yellow-400/50 bg-yellow-400/10" : "border-white/10 bg-white/5"}`}>
+              <p className="text-sm text-zinc-400 mb-1">
+                {botCountdown > 0 ? (
+                  <>
+                    A practice bot will join in{" "}
+                    <span className={`font-black font-mono text-lg ${botCountdown <= 10 ? "text-yellow-400" : "text-white"}`}>
+                      {botCountdown}s
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-yellow-400 font-bold">Bot joining…</span>
+                )}
+              </p>
+              <p className="text-xs text-zinc-600">
+                Real players always take priority — the bot only fills if nobody joins
+              </p>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-3 justify-center">
+              <button
+                onClick={playBotNow}
+                disabled={busy}
+                className="rounded-2xl border border-yellow-400/40 bg-yellow-400/10 hover:bg-yellow-400/20 px-6 py-3 font-bold text-yellow-300 transition-colors disabled:opacity-50"
+              >
+                <Zap className="inline w-4 h-4 mr-2" />
+                Play bot now
+              </button>
+              <button
+                onClick={leave}
+                disabled={busy}
+                className="inline-flex items-center justify-center gap-2 border border-white/15 hover:border-brand-red/50 hover:text-red-200 text-zinc-300 px-6 py-3 rounded-2xl transition-colors"
+              >
+                <CircleStop className="w-4 h-4" /> Leave
+              </button>
+            </div>
           </div>
         )}
 
-        {/* Match found */}
+        {/* Match found — pre-game card, then QuickDraw */}
         {phase === "matchFound" && matchView && (
           <div className={`glass-panel rounded-3xl border p-10 ${matchView.bot ? "border-yellow-400/30" : "border-brand-cyan/30"}`}>
             <div className="text-center mb-8">
               <Swords className={`w-12 h-12 mx-auto mb-4 ${matchView.bot ? "text-yellow-400" : "text-brand-cyan"}`} />
               <h2 className="text-3xl font-black uppercase tracking-tight">
-                {matchView.bot ? "Practice bot ready" : "Match found"}
+                {matchView.bot ? "Practice Duel" : "Match Found"}
               </h2>
             </div>
             <div className="grid grid-cols-2 gap-4 mb-8">
@@ -571,7 +653,7 @@ export default function ArenaPage() {
                 </p>
                 <p className="text-2xl font-black font-mono">{Math.round(matchView.opponent.rating)}</p>
                 {matchView.bot ? (
-                  <p className="text-xs text-yellow-400/80 mt-1">unrated · no stress</p>
+                  <p className="text-xs text-yellow-400/80 mt-1">unrated</p>
                 ) : (
                   <p className="text-xs text-zinc-500 font-mono mt-1">
                     {matchView.opponent.wallet.slice(0, 6)}…{matchView.opponent.wallet.slice(-4)}
@@ -579,38 +661,36 @@ export default function ArenaPage() {
                 )}
               </div>
             </div>
-            <p className="text-sm text-zinc-400 text-center mb-8">
-              {matchView.bot
-                ? "Play your practice game and report the result — it settles instantly and never touches your rating."
-                : "Play your match, then both players confirm the result below. Honest reporting keeps the ladder healthy — conflicts go to arbitration."}
-            </p>
-            <div className="grid grid-cols-3 gap-3">
-              <button
-                onClick={() => report("win")}
-                disabled={busy}
-                className="rounded-2xl border border-brand-cyan/40 bg-brand-cyan/10 hover:bg-brand-cyan/20 py-4 font-bold transition-colors disabled:opacity-50"
-              >
-                I won
-              </button>
-              <button
-                onClick={() => report("draw")}
-                disabled={busy}
-                className="rounded-2xl border border-white/15 hover:border-white/30 bg-white/5 py-4 font-bold transition-colors disabled:opacity-50"
-              >
-                Draw
-              </button>
-              <button
-                onClick={() => report("loss")}
-                disabled={busy}
-                className="rounded-2xl border border-white/15 hover:border-white/30 bg-white/5 py-4 font-bold transition-colors disabled:opacity-50"
-              >
-                I lost
-              </button>
+
+            <div className="rounded-2xl border border-white/10 bg-black/40 p-6 mb-8">
+              <h3 className="text-sm font-bold uppercase tracking-widest text-brand-cyan mb-3 text-center">
+                Quick Draw — Reaction Duel
+              </h3>
+              <ul className="text-sm text-zinc-400 space-y-1.5 text-center">
+                <li>5 rounds · first to 3 wins takes the match</li>
+                <li>Wait for the screen to turn <span className="text-emerald-400 font-bold">green</span>, then click</li>
+                <li>Click before green = <span className="text-orange-400 font-bold">false start</span>, you lose the round</li>
+                <li>Faster reaction wins — the bot averages 230–380ms</li>
+              </ul>
             </div>
-            <p className="mt-4 text-xs text-zinc-500 text-center">
-              Your wallet signs each report — tamper-proof evidence for rated and staked play.
-            </p>
+
+            <button
+              onClick={() => setPhase("playing")}
+              className="w-full bg-gradient-to-r from-brand-cyan/20 to-transparent hover:from-brand-cyan/30 text-white px-8 py-5 rounded-2xl font-black text-lg uppercase tracking-wide transition-all hover:scale-[1.02] active:scale-95 border border-brand-cyan/30 hover:border-brand-cyan/60 shadow-[0_0_30px_rgba(0,229,255,0.3)]"
+            >
+              <Zap className="inline w-6 h-6 mr-2 -mt-1" />
+              Start Duel
+            </button>
           </div>
+        )}
+
+        {/* Playing QuickDraw */}
+        {phase === "playing" && matchView && (
+          <QuickDraw
+            opponentName={matchView.opponent.wallet}
+            isBot={matchView.bot ?? false}
+            onFinish={handleGameFinish}
+          />
         )}
 
         {/* Reported, waiting */}

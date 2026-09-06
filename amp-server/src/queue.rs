@@ -268,6 +268,7 @@ mod tests {
             registry_game_id: 0,
             escrow_window_minutes: 10,
             rt_grace_minutes: 30,
+            multiplayer_address: None,
             site_name: "AMP Arena".into(),
         })
     }
@@ -288,6 +289,7 @@ mod tests {
                 language: "en".into(),
                 max_ping_ms: 150,
                 enqueued_at_ms: now_ms(),
+                party_size: 1,
             },
         }
     }

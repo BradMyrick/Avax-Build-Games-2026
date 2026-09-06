@@ -16,11 +16,26 @@ const FALLBACK_TXS: TxDisplay[] = [
 
 // Live contract on Fuji — the sponsored-prize tournament escrow.
 export default function FujiNetwork() {
-    const [transactions, setTransactions] = useState<TxDisplay[]>(() => {
-        if (typeof window === 'undefined') return FALLBACK_TXS;
+    // Always start with FALLBACK_TXS for SSR/client hydration parity.
+    // localStorage data loads in useEffect (client-only, post-hydration).
+    const [transactions, setTransactions] = useState<TxDisplay[]>(FALLBACK_TXS);
+
+    // Hydrate stored simulations after mount — never during SSR render.
+    // Defers setState via queueMicrotask to satisfy the React 19
+    // set-state-in-effect lint (prevents cascading renders).
+    useEffect(() => {
         const stored = localStorage.getItem('amp-simulations');
-        return stored ? JSON.parse(stored).slice(0, 5) : FALLBACK_TXS;
-    });
+        if (stored) {
+            try {
+                const parsed = JSON.parse(stored);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    queueMicrotask(() => setTransactions(parsed.slice(0, 5)));
+                }
+            } catch {
+                // corrupted localStorage — keep fallback
+            }
+        }
+    }, []);
 
     useEffect(() => {
         const fetchLogs = async () => {

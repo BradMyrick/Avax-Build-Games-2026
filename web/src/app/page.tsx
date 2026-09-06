@@ -73,7 +73,6 @@ export default function Home() {
           <GrantBadge />
 
           <h1 className="text-5xl md:text-7xl lg:text-8xl font-black tracking-tighter mb-8 leading-[1.1] uppercase drop-shadow-[0_0_30px_rgba(0,229,255,0.2)]">
-            <span className="text-brand-quaternary-cyan drop-shadow-[0_0_25px_rgba(0,229,255,0.4)]">OPEN</span><br />
             MATCHMA<span className="text-yellow-400 drop-shadow-[0_0_20px_rgba(250,204,21,0.8)]">KING</span><br />
 
             <span className="text-4xl md:text-5xl text-zinc-400 lowercase font-medium tracking-normal block my-4">for</span>
@@ -177,7 +176,7 @@ export default function Home() {
             <Link href="https://github.com/bradmyrick/Avalanche-Matchmaking-Protocol" className="hover:text-brand-cyan transition-colors">GitHub</Link>
             <Link href="mailto:brad@kodr.pro" className="hover:text-brand-cyan transition-colors">Contact</Link>
             <Link href="/terms" className="hover:text-brand-cyan transition-colors">Terms</Link>
-            <Link href="https://docs.page/bradmyrick/Avalanche-Matchmaking-Protocol" target="_blank" className="hover:text-brand-cyan transition-colors">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-cyan transition-colors">Docs</Link>
           </div>
         </div>
       </footer>
