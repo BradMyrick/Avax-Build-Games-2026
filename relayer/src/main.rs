@@ -57,6 +57,26 @@ abigen!(
     ]"#,
 );
 
+abigen!(
+    AMPMultiplayer,
+    r#"[
+        {
+            "type": "function",
+            "name": "settleMultiplayer",
+            "inputs": [
+                { "name": "matchId", "type": "bytes32", "internalType": "bytes32" },
+                { "name": "rankedPlacements", "type": "address[]", "internalType": "address[]" },
+                { "name": "transcriptHash", "type": "bytes32", "internalType": "bytes32" },
+                { "name": "sessionNonce", "type": "uint256", "internalType": "uint256" },
+                { "name": "signerBitmask", "type": "uint256", "internalType": "uint256" },
+                { "name": "packedSignatures", "type": "bytes", "internalType": "bytes" }
+            ],
+            "outputs": [],
+            "stateMutability": "nonpayable"
+        }
+    ]"#,
+);
+
 mod bracket;
 
 mod config;
@@ -504,30 +524,62 @@ async fn settle_multi_job(
 
 #[allow(clippy::too_many_arguments)]
 async fn submit_multiplayer_settlement(
-    _provider: &Arc<SignerProvider>,
-    _contract_addr: &Address,
-    _on_chain_match_id: u64,
-    _ranked: &[Address],
-    _transcript_hash: &str,
-    _session_nonce: u64,
-    _signer_mask: u64,
-    _sig_bytes: &[u8],
+    provider: &Arc<SignerProvider>,
+    contract_addr: &Address,
+    on_chain_match_id: u64,
+    ranked: &[Address],
+    transcript_hash: &str,
+    session_nonce: u64,
+    signer_mask: u64,
+    sig_bytes: &[u8],
 ) -> Result<String> {
-    // The actual on-chain call to AMPMultiplayer.settleMultiplayer.
-    // For now, log the intent and return a placeholder — the full
-    // alloy-based submission lands with the AMPMultiplayer abigen in the
-    // relayer once the contract is wired to the same deployment as the
-    // server's config.
-    tracing::info!(
-        match_id = _on_chain_match_id,
-        signers = _signer_mask.count_ones(),
-        ranked_count = _ranked.len(),
-        sig_count = _sig_bytes.len() / 65,
-        "settle_multi: ready for on-chain submission (abigen wiring pending)"
+    let contract = AMPMultiplayer::new(*contract_addr, Arc::clone(provider));
+
+    // Build the matchId bytes32: the server sends a UUID as the on-chain
+    // match id — convert to a 32-byte left-padded value.
+    let match_id_bytes = {
+        let mut b = [0u8; 32];
+        b[24..].copy_from_slice(&on_chain_match_id.to_be_bytes());
+        b
+    };
+
+    let transcript: [u8; 32] = {
+        let th = hex::decode(transcript_hash.trim_start_matches("0x"))
+            .context("bad transcript hash hex")?;
+        if th.len() != 32 {
+            return Err(anyhow!(
+                "transcript hash must be 32 bytes, got {}",
+                th.len()
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&th);
+        arr
+    };
+
+    let call = contract
+        .settle_multiplayer(
+            match_id_bytes,
+            ranked.to_vec(),
+            transcript,
+            U256::from(session_nonce),
+            U256::from(signer_mask),
+            sig_bytes.to_vec().into(),
+        )
+        .gas(500_000);
+
+    let pending = call.send().await.context("send settleMultiplayer")?;
+    let receipt = pending.await?.context("settleMultiplayer reverted")?;
+
+    info!(
+        tx = format!("{:?}", receipt.transaction_hash),
+        match_id = on_chain_match_id,
+        signers = signer_mask.count_ones(),
+        ranked = ranked.len(),
+        "settleMultiplayer confirmed on-chain"
     );
-    Err(anyhow!(
-        "settle_multi on-chain submission pending AMPMultiplayer abigen wiring — contract deployed but relayer binding not yet generated"
-    ))
+
+    Ok(format!("{:?}", receipt.transaction_hash))
 }
 
 async fn settle_match_job(
