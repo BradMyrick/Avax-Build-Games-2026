@@ -1330,7 +1330,63 @@ async fn multi_claim(
         .await
         .map_err(ApiError::Database)?;
 
+    // Apply Glicko-2 rating updates from the settled ladder.
+    let ladder: Vec<(String, u16)> = serde_json::from_value(
+        payload["rankedPlacements"]
+            .as_array()
+            .map(|arr| {
+                serde_json::Value::Array(
+                    arr.iter()
+                        .enumerate()
+                        .map(|(i, addr)| {
+                            serde_json::json!([addr.as_str().unwrap_or(""), (i + 1) as u16])
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or_default(),
+    )
+    .unwrap_or_default();
+
+    let rating_updates = crate::rating_pipeline::apply_multi_ratings(
+        &st.store,
+        id,
+        &m.game_id,
+        &m.ruleset_id,
+        &ladder,
+        0.7, // γ anti-boost (configurable via env in a future pass)
+    )
+    .await;
+
     st.store.update_multi_state(id, "settling").await?;
+
+    // Notify every player with their personalized rating delta.
+    match rating_updates {
+        Ok(updates) => {
+            for u in &updates {
+                st.hub.send(
+                    &u.wallet,
+                    "multi_result",
+                    serde_json::json!({
+                        "matchId": id.to_string(),
+                        "outcome": {
+                            "ratingBefore": u.rating_before,
+                            "ratingAfter": u.rating_after,
+                            "delta": u.delta,
+                            "deviationAfter": u.deviation_after,
+                        },
+                    }),
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = format!("{e:#}"),
+                "rating pipeline failed (match still settles)"
+            );
+        }
+    }
+
     Ok(Json(json!({
         "matchId": id.to_string(),
         "state": "settling",

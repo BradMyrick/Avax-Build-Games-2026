@@ -18,10 +18,12 @@ mod escrow;
 mod http;
 mod intent;
 mod ladder;
+mod lobby;
 mod matchsvc;
 mod multiplayer;
 mod party;
 mod queue;
+mod rating_pipeline;
 mod store;
 mod ws;
 
@@ -189,6 +191,18 @@ async fn main() -> anyhow::Result<()> {
                 if let Err(e) = tick_once(&st).await {
                     tracing::error!(error = format!("{e:#}"), "matchmaker tick failed");
                 }
+                // N-player lobby formation from revealed commits.
+                let mp_addr = st.cfg.multiplayer_address.clone().unwrap_or_default();
+                if let Err(e) = crate::lobby::form_lobbies_from_reveals(
+                    &st.store,
+                    &st.hub,
+                    &mp_addr,
+                    st.cfg.chain_id,
+                )
+                .await
+                {
+                    tracing::warn!(error = format!("{e:#}"), "lobby formation failed");
+                }
             }
         });
     }
@@ -202,6 +216,9 @@ async fn main() -> anyhow::Result<()> {
                 interval.tick().await;
                 if let Err(e) = sweep_once(&st).await {
                     tracing::error!(error = format!("{e:#}"), "expiry sweep failed");
+                }
+                if let Err(e) = crate::lobby::multi_sweep(&st.store, &st.hub).await {
+                    tracing::warn!(error = format!("{e:#}"), "multi sweep failed");
                 }
             }
         });
