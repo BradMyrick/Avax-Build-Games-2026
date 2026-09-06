@@ -48,7 +48,7 @@ services:
       AMP_CORS_ORIGINS: ${AMP_CORS_ORIGINS:-*}
       RUST_LOG: info
     ports:
-      - "8080:8080"
+      - "${AMP_HOST_PORT:-8080}:8080"
 
   # Optional TLS terminator. Uncomment once DNS points at this host, e.g.
   # amp.playwithamp.xyz → this machine's public IPv4.
