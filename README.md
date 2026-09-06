@@ -20,16 +20,22 @@ tick; the money and attestations live on-chain.
 
 ```
 web/ (Next.js)                    amp-server (Rust)                    contracts/ (Solidity)
-  /arena — queue UI, wallet         HTTP/WS gateway (axum)                AMPRegistry + AMPSettlement
-    login, live match view          amp-match-core (pure lib:               ├─ staked matches: escrow,
-  /setup /cup /claim —                Glicko-2, rules, queue)                verifier-attested payouts,
-    tournaments (kept working)      EIP-191 challenge-response              bps rake, dispute arbitration
-        │                           EIP-712 outcome attestation           AMPTournamentCup (untouched)
-        ▼                                  │                                └─ sponsor prize cups
-  amp-server API / WS                     ▼
-        │                          Postgres (Neon) ◀── relayer_jobs ── relayer (Rust, custody)
-        ▼                          players, ratings, queue,             drains jobs, submits txs:
-  one EIP-191 signature            matches, reports                      fund | finalize | settle_match
+  /arena — QuickDraw game          HTTP/WS gateway (axum)                AMPRegistry + AMPSettlement
+  /arena/multi — parties,          amp-match-core (pure lib:               ├─ staked matches: escrow,
+    commit-reveal, ladder            Glicko-2, rules, queue,                verifier-attested payouts,
+  /docs — self-contained            parties, commitments)                  bps rake, dispute arbitration
+  /setup /cup /claim —           EIP-191 challenge-response            AMPMultiplayer (v2)
+    tournaments (kept working)    EIP-712 outcome attestation             ├─ N-player dual-deposit
+        │                         K-of-N quorum collector                 │  escrow + reporting bonds
+        ▼                         commit-reveal anti-collusion            ├─ K=⌊2N/3⌋+1 quorum settle
+  amp-server API / WS             lobby formation + blockhash shuffle     ├─ prove-your-payout claims
+        │                         rating pipeline (γ-anti-boost)          └─ studio/protocol fee split
+        ▼                                  │                             AMPTournamentCup (untouched)
+  one EIP-191 signature                   ▼                                └─ sponsor prize cups
+                                  Postgres (Neon) ◀── relayer_jobs ── relayer (Rust, custody)
+                                  players, ratings, queue,             drains jobs, submits txs:
+                                  matches, reports, parties,           fund | finalize | settle_match
+                                  commits, multi-matches, ladders      settle_multi (on-chain quorum)
 ```
 
 **Components:**
@@ -78,16 +84,24 @@ Trust rules for reports: both agree → settled. Conflict → disputed,
 operator arbitrates. Opponent silent past the deadline → reporter's result
 stands. Nobody reports → cancelled, ratings untouched.
 
-## v2: N-player multiplayer (in build)
+## v2: N-player multiplayer (shipped)
 
 v2 extends AMP from 1v1 to parties, teams, FFA lobbies (4–16), and battle
 royale (16–64) with dual-deposit escrow (stake + reporting bond), K-of-N
 quorum settlement (`K = ⌊2N/3⌋+1`), early-exit death certificates,
 commit-reveal anti-collusion queueing, and payout profiles. The design
 record — decisions, invariants, and deliberate spec deviations — lives in
-[`docs/design/n-player-v2.md`](docs/design/n-player-v2.md); the N-player
-core primitives are live in `amp-match-core` (`party`, `ladder`, `commit`,
-team/FFA/BR queue topologies), fuzz-gated per the spec's test matrix.
+[`docs/design/n-player-v2.md`](docs/design/n-player-v2.md).
+
+**What's live:** the `AMPMultiplayer` contract (deployed, sourcify-verified,
+91 forge tests + conservation fuzz gates), the full amp-server N-player
+pipeline (party sessions, commit-reveal, quorum collector, rating pipeline
+with γ-anti-boost, lobby formation, multi sweep), the `/arena/multi`
+frontend with party invite codes and interactive ladder reporting, and the
+`QuickDraw` reaction-duel demo game (real bot opponents, 230–380ms
+realistic reaction times). The relayer's `settle_multi` job submits to the
+live contract. Self-contained developer docs at
+[playwithamp.xyz/docs](https://playwithamp.xyz/docs).
 
 ## The three hard problems — and what ships for each
 
