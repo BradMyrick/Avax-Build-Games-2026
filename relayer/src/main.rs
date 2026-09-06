@@ -183,6 +183,7 @@ async fn poll_once(
         "fund" => fund_job(provider, &job, key_str, pool, cfg).await,
         "finalize" => finalize_job(provider, &job, key_str, pool, cfg).await,
         "settle_match" => settle_match_job(provider, &job, pool, cfg).await,
+        "settle_multi" => settle_multi_job(provider, &job, pool, cfg).await,
         other => Err(anyhow!("unknown job kind: {other}")),
     };
 
@@ -422,6 +423,113 @@ async fn finalize_job(
 /// Settle a staked match: the amp-server (verifier) has already EIP-712-signed
 /// the AsyncResult; the relayer's job is pure submission — recover the tx,
 /// submit, confirm, and flip the match row to `settled`.
+/// Settle an N-player multiplayer match: the amp-server has already
+/// collected and verified a K-of-N concordant quorum of EIP-712 ladder
+/// signatures; the relayer's job is pure submission to AMPMultiplayer.
+async fn settle_multi_job(
+    provider: &Arc<SignerProvider>,
+    job: &Job,
+    pool: &PgPool,
+    cfg: &Arc<Config>,
+) -> Result<(Option<i64>, Option<String>)> {
+    #[derive(Deserialize)]
+    struct SettleMultiPayload {
+        #[serde(rename = "matchUuid")]
+        match_uuid: String,
+        #[serde(rename = "onChainMatchId")]
+        on_chain_match_id: i64,
+        #[serde(rename = "rankedPlacements")]
+        ranked_placements: Vec<String>,
+        #[serde(rename = "transcriptHash")]
+        transcript_hash: String,
+        #[serde(rename = "sessionNonce")]
+        session_nonce: u64,
+        #[serde(rename = "signerBitmask")]
+        signer_bitmask: String,
+        #[serde(rename = "packedSignatures")]
+        packed_signatures: String,
+    }
+    let p: SettleMultiPayload = serde_json::from_value(job.payload.clone())?;
+
+    let contract_addr: Address = cfg
+        .multiplayer_address
+        .as_deref()
+        .and_then(|a| a.parse().ok())
+        .ok_or_else(|| anyhow!("AMP_MULTIPLAYER_ADDRESS not configured"))?;
+
+    // Parse the ranked placements.
+    let ranked: Vec<Address> = p
+        .ranked_placements
+        .iter()
+        .map(|s| s.parse::<Address>())
+        .collect::<Result<Vec<_>, _>>()
+        .context("bad ranked placements")?;
+
+    // Parse the signer bitmask (hex string like "0x3f").
+    let signer_mask = u64::from_str_radix(p.signer_bitmask.trim_start_matches("0x"), 16)
+        .context("bad signer bitmask")?;
+
+    // Parse packed signatures.
+    let sig_bytes = hex::decode(p.packed_signatures.trim_start_matches("0x"))
+        .context("bad packed signatures")?;
+    if sig_bytes.len() % 65 != 0 {
+        return Err(anyhow!(
+            "packed signatures length {} not multiple of 65",
+            sig_bytes.len()
+        ));
+    }
+
+    let tx_hash = submit_multiplayer_settlement(
+        provider,
+        &contract_addr,
+        p.on_chain_match_id as u64,
+        &ranked,
+        &p.transcript_hash,
+        p.session_nonce,
+        signer_mask,
+        &sig_bytes,
+    )
+    .await?;
+
+    // Update the server's match row.
+    sqlx::query(
+        "UPDATE amp_multi_matches SET state = 'settled', settled_at = now() WHERE id = $1::uuid",
+    )
+    .bind(&p.match_uuid)
+    .execute(pool)
+    .await?;
+
+    Ok((Some(p.on_chain_match_id), Some(tx_hash)))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submit_multiplayer_settlement(
+    _provider: &Arc<SignerProvider>,
+    _contract_addr: &Address,
+    _on_chain_match_id: u64,
+    _ranked: &[Address],
+    _transcript_hash: &str,
+    _session_nonce: u64,
+    _signer_mask: u64,
+    _sig_bytes: &[u8],
+) -> Result<String> {
+    // The actual on-chain call to AMPMultiplayer.settleMultiplayer.
+    // For now, log the intent and return a placeholder — the full
+    // alloy-based submission lands with the AMPMultiplayer abigen in the
+    // relayer once the contract is wired to the same deployment as the
+    // server's config.
+    tracing::info!(
+        match_id = _on_chain_match_id,
+        signers = _signer_mask.count_ones(),
+        ranked_count = _ranked.len(),
+        sig_count = _sig_bytes.len() / 65,
+        "settle_multi: ready for on-chain submission (abigen wiring pending)"
+    );
+    Err(anyhow!(
+        "settle_multi on-chain submission pending AMPMultiplayer abigen wiring — contract deployed but relayer binding not yet generated"
+    ))
+}
+
 async fn settle_match_job(
     provider: &Arc<SignerProvider>,
     job: &Job,

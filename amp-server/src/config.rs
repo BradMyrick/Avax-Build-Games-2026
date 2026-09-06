@@ -48,6 +48,8 @@ pub struct Config {
     /// Grace period for direct RT settlement before the relayer takes over
     /// (minutes).
     pub rt_grace_minutes: i64,
+    /// AMPMultiplayer.sol address (v2 N-player escrow + quorum settlement).
+    pub multiplayer_address: Option<String>,
     /// Public site name rendered inside the wallet's sign-in message.
     pub site_name: String,
 }
@@ -161,6 +163,9 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .filter(|&m| m >= 1)
                 .unwrap_or(30),
+            multiplayer_address: std::env::var("AMP_MULTIPLAYER_ADDRESS")
+                .ok()
+                .filter(|a| !a.is_empty()),
             site_name: std::env::var("AMP_SITE_NAME")
                 .ok()
                 .filter(|n| !n.is_empty())

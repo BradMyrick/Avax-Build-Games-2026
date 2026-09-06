@@ -268,6 +268,7 @@ mod tests {
             registry_game_id: 0,
             escrow_window_minutes: 10,
             rt_grace_minutes: 30,
+            multiplayer_address: None,
             site_name: "AMP Arena".into(),
         })
     }
