@@ -253,16 +253,19 @@ export default function ArenaPage() {
     (r) => selected && r.gameId === selected.gameId && r.rulesetId === selected.rulesetId,
   );
 
-  // Developer-only diagnostic — never rendered to visitors.
-  if (typeof window !== "undefined" && matchmakerMisconfigured()) {
-    console.error(
-      `[AMP] Matchmaker misconfigured: build targets ${AMP_SERVER_URL}. ` +
-        "Set NEXT_PUBLIC_AMP_SERVER_URL before the next build.",
-    );
-  }
-
-  const misconfigured =
-    typeof window !== "undefined" && matchmakerMisconfigured();
+  // Misconfiguration detection must happen post-hydration (it reads
+  // window.location.hostname — SSR has no window, so checking during render
+  // causes hydration mismatches).
+  const [misconfigured, setMisconfigured] = useState(false);
+  useEffect(() => {
+    if (matchmakerMisconfigured()) {
+      setMisconfigured(true);
+      console.error(
+        `[AMP] Matchmaker misconfigured: build targets ${AMP_SERVER_URL}. ` +
+          "Set NEXT_PUBLIC_AMP_SERVER_URL before the next build.",
+      );
+    }
+  }, []);
 
   return (
     <div className="min-h-screen bg-black text-white antialiased">
