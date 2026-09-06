@@ -198,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
                     &st.hub,
                     &mp_addr,
                     st.cfg.chain_id,
+                    &st.cfg.rpc_url,
                 )
                 .await
                 {

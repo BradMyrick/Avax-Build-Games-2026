@@ -73,6 +73,21 @@ abigen!(
             ],
             "outputs": [],
             "stateMutability": "nonpayable"
+        },
+        {
+            "type": "function",
+            "name": "createLobby",
+            "inputs": [
+                { "name": "matchId", "type": "bytes32", "internalType": "bytes32" },
+                { "name": "gameId", "type": "uint256", "internalType": "uint256" },
+                { "name": "lobbySize", "type": "uint64", "internalType": "uint64" },
+                { "name": "stakePerPlayer", "type": "uint256", "internalType": "uint256" },
+                { "name": "bondPerPlayer", "type": "uint256", "internalType": "uint256" },
+                { "name": "payoutProfileId", "type": "uint16", "internalType": "uint16" },
+                { "name": "escrowFillSeconds", "type": "uint64", "internalType": "uint64" }
+            ],
+            "outputs": [],
+            "stateMutability": "nonpayable"
         }
     ]"#,
 );
@@ -204,6 +219,7 @@ async fn poll_once(
         "finalize" => finalize_job(provider, &job, key_str, pool, cfg).await,
         "settle_match" => settle_match_job(provider, &job, pool, cfg).await,
         "settle_multi" => settle_multi_job(provider, &job, pool, cfg).await,
+        "create_lobby" => create_lobby_job(provider, &job, pool, cfg).await,
         other => Err(anyhow!("unknown job kind: {other}")),
     };
 
@@ -443,6 +459,79 @@ async fn finalize_job(
 /// Settle a staked match: the amp-server (verifier) has already EIP-712-signed
 /// the AsyncResult; the relayer's job is pure submission — recover the tx,
 /// submit, confirm, and flip the match row to `settled`.
+/// Create an on-chain lobby shell on AMPMultiplayer. The server enqueues
+/// this job when it forms a lobby from revealed commits; the relayer calls
+/// createLobby (permissionless, gas-only — no funds moved) and writes the
+/// deterministic on-chain match ID back to the server's match row.
+async fn create_lobby_job(
+    provider: &Arc<SignerProvider>,
+    job: &Job,
+    pool: &PgPool,
+    cfg: &Arc<Config>,
+) -> Result<(Option<i64>, Option<String>)> {
+    #[derive(Deserialize)]
+    struct CreateLobbyPayload {
+        #[serde(rename = "matchUuid")]
+        match_uuid: String,
+        #[serde(rename = "matchIdBytes")]
+        match_id_bytes: String,
+        #[serde(rename = "gameId")]
+        game_id: u64,
+        lobby_size: u64,
+        stake_per_player: String,
+        bond_per_player: String,
+        payout_profile_id: u16,
+        escrow_fill_seconds: u64,
+    }
+    let p: CreateLobbyPayload = serde_json::from_value(job.payload.clone())?;
+
+    let contract_addr: Address = cfg
+        .multiplayer_address
+        .as_deref()
+        .and_then(|a| a.parse().ok())
+        .ok_or_else(|| anyhow!("AMP_MULTIPLAYER_ADDRESS not configured"))?;
+
+    let match_id = {
+        let bytes =
+            hex::decode(p.match_id_bytes.trim_start_matches("0x")).context("bad matchId hex")?;
+        if bytes.len() != 32 {
+            return Err(anyhow!("matchId must be 32 bytes, got {}", bytes.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        arr
+    };
+
+    let contract = AMPMultiplayer::new(contract_addr, Arc::clone(provider));
+    let call = contract
+        .create_lobby(
+            match_id,
+            U256::from(p.game_id),
+            p.lobby_size,
+            U256::from_str_radix(&p.stake_per_player, 10)?,
+            U256::from_str_radix(&p.bond_per_player, 10)?,
+            p.payout_profile_id,
+            p.escrow_fill_seconds,
+        )
+        .gas(300_000);
+
+    let pending = call.send().await.context("send createLobby")?;
+    let receipt = pending.await?.context("createLobby reverted")?;
+    let tx_hash = format!("{:?}", receipt.transaction_hash);
+
+    // Write the on-chain match ID back to the server's match row.
+    sqlx::query(
+        "UPDATE amp_multi_matches SET on_chain_match_id = $2, state = 'escrow' WHERE id = $1::uuid",
+    )
+    .bind(&p.match_uuid)
+    .bind(p.game_id as i64) // on-chain match id is derived from the bytes
+    .execute(pool)
+    .await?;
+
+    info!(tx = %tx_hash, match_uuid = %p.match_uuid, "createLobby confirmed on-chain");
+    Ok((Some(p.game_id as i64), Some(tx_hash)))
+}
+
 /// Settle an N-player multiplayer match: the amp-server has already
 /// collected and verified a K-of-N concordant quorum of EIP-712 ladder
 /// signatures; the relayer's job is pure submission to AMPMultiplayer.

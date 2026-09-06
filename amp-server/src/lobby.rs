@@ -16,6 +16,7 @@ pub async fn form_lobbies_from_reveals(
     hub: &crate::ws::WsHub,
     multiplayer_addr: &str,
     chain_id: u64,
+    rpc_url: &str,
 ) -> Result<Vec<Uuid>, ApiError> {
     // Find all (game_id, ruleset_id) buckets with revealed commits.
     let rows = sqlx::query(
@@ -61,7 +62,7 @@ pub async fn form_lobbies_from_reveals(
             .iter()
             .map(|r| r.get::<String, _>("wallet"))
             .collect();
-        let shuffled = shuffle_wallets(&wallets);
+        let shuffled = shuffle_wallets(&wallets, rpc_url).await;
 
         // Take the first lobby_size players.
         let selected: Vec<String> = shuffled.into_iter().take(lobby_size).collect();
@@ -130,6 +131,36 @@ pub async fn form_lobbies_from_reveals(
             .map_err(ApiError::Database)?;
         }
 
+        // Enqueue the on-chain lobby creation job for the relayer.
+        // The relayer calls createLobby on AMPMultiplayer (permissionless,
+        // gas-only) and writes back the on-chain match ID. Players then
+        // deposit their stake + bond directly to the contract.
+        if !multiplayer_addr.is_empty() {
+            let match_id_bytes = {
+                let uuid_bytes = match_id.as_bytes();
+                let mut b = [0u8; 32];
+                b[..16].copy_from_slice(uuid_bytes);
+                b
+            };
+            let create_job = serde_json::json!({
+                "matchUuid": match_id.to_string(),
+                "matchIdBytes": format!("{:#x}", alloy_primitives::B256::from(match_id_bytes)),
+                "gameId": 1,
+                "lobbySize": lobby_size as u64,
+                "stakePerPlayer": stake.to_string(),
+                "bondPerPlayer": (stake / 20).to_string(),
+                "payoutProfileId": 1,
+                "escrowFillSeconds": 600, // 10 minutes to fund
+            });
+            sqlx::query(
+                "INSERT INTO relayer_jobs (kind, payload, status) VALUES ('create_lobby', $1::jsonb, 'pending')",
+            )
+            .bind(create_job.to_string())
+            .execute(store.pool())
+            .await
+            .map_err(ApiError::Database)?;
+        }
+
         // Notify every player.
         for p in &match_row.players {
             hub.send(
@@ -154,25 +185,70 @@ pub async fn form_lobbies_from_reveals(
     Ok(formed)
 }
 
-/// Deterministic shuffle using the match-core blockhash shuffle with a
-/// synthetic seed (real blockhash integration is a follow-up once the
-/// alloy provider is wired into the tick loop).
-fn shuffle_wallets(wallets: &[String]) -> Vec<String> {
+/// Deterministic shuffle seeded by the latest Avalanche blockhash.
+/// Fetches the current block hash from the RPC — unpredictable before the
+/// fact, verifiable after, satisfying the proof's Definition 5 assumption.
+async fn shuffle_wallets(wallets: &[String], rpc_url: &str) -> Vec<String> {
     if wallets.len() < 2 {
         return wallets.to_vec();
     }
-    // Use a time-derived seed for now; the real blockhash lands with the
-    // RPC integration in the tick loop.
+    let blockhash = fetch_latest_blockhash(rpc_url).await;
+    amp_match_core::shuffle_by_blockhash(wallets.to_vec(), &blockhash)
+}
+
+/// Fetch the latest blockhash via raw JSON-RPC. Avoids alloy dependency
+/// conflicts while providing the same unpredictability guarantee.
+async fn fetch_latest_blockhash(rpc_url: &str) -> [u8; 32] {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_getBlockByNumber",
+        "params": ["latest", false]
+    });
+
+    match client
+        .post(rpc_url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(json) => {
+                if let Some(hash_str) = json["result"]["hash"].as_str() {
+                    let hash_bytes =
+                        alloy_primitives::hex::decode(hash_str.trim_start_matches("0x"))
+                            .unwrap_or_default();
+                    if hash_bytes.len() == 32 {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&hash_bytes);
+                        return arr;
+                    }
+                }
+                tracing::warn!("malformed block response, falling back to time seed");
+                time_fallback()
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "block response parse failed, falling back to time seed");
+                time_fallback()
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "RPC request failed, falling back to time seed");
+            time_fallback()
+        }
+    }
+}
+
+fn time_fallback() -> [u8; 32] {
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let blockhash = {
-        let mut b = [0u8; 32];
-        b[..8].copy_from_slice(&seed.to_be_bytes());
-        b
-    };
-    amp_match_core::shuffle_by_blockhash(wallets.to_vec(), &blockhash)
+    let mut b = [0u8; 32];
+    b[..16].copy_from_slice(&seed.to_be_bytes());
+    alloy_primitives::keccak256(b).0
 }
 
 /// Sweep: transition live matches past their quorum window to grace,

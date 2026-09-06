@@ -16,7 +16,7 @@
     line(length: 100%, stroke: 0.4pt + rgb("#cbd5e1"))
     v(0.2em)
     text(size: 7.5pt, fill: rgb("#64748b"))[
-      AMP v2 Protocol Specification --- *DRAFT* internal snapshot (`5bbc816`)
+      AMP v2 Protocol Specification --- *DRAFT* internal snapshot (latest)
       #h(1fr)
       Page #counter(page).display() of #counter(page).final().first()
     ]
@@ -524,7 +524,7 @@ All contract deployments live on the Avalanche *Fuji testnet*. Nothing is deploy
   `AMPRegistry` at `0xf6B0eA6c88c574c4BbEAdC186AAfe72C43C2cDc2` and `AMPSettlement` at
   `0x78ec93e66255a74873d20DD62C6595A389272126`.
 - *v2 N-player engine (live on Fuji, Sourcify full-match verified):*
-  `AMPMultiplayer` at `0xcabf7b626172fE55d54f03c346563671AbcC77f7`, branch `n-player-multiplayer` (`5bbc816`).
+  `AMPMultiplayer` at `0xcabf7b626172fE55d54f03c346563671AbcC77f7`, branch `n-player-multiplayer`.
   Implements dual-deposit escrow, bitmask quorum verification, and immutable payout profiles with lazy claims.
 - *Match core library (`amp-match-core`):*
   Pure Rust core implementing `party.rs`, team/FFA/BR queue topologies, commitments and the blockhash shuffle, and

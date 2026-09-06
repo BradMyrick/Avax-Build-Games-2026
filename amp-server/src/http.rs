@@ -108,6 +108,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/multi/{id}", get(get_multi_match))
         .route("/v1/multi/{id}/report", post(multi_report))
         .route("/v1/multi/{id}/claim", post(multi_claim))
+        .route("/v1/multi/{id}/exit", post(submit_exit_cert))
+        .route("/v1/multi/{id}/exit/{wallet}", post(countersign_exit))
         .route("/v1/ws", get(ws_upgrade))
         .with_state(state)
 }
@@ -1270,11 +1272,12 @@ async fn multi_reveal(
     }
 
     sqlx::query(
-        "UPDATE amp_commits SET state = 'revealed', salt = $3, revealed_at = now() WHERE wallet = $1 AND game_id = $2 AND ruleset_id = $2",
+        "UPDATE amp_commits SET state = 'revealed', salt = $3, revealed_at = now() WHERE wallet = $1 AND game_id = $2 AND ruleset_id = $4",
     )
     .bind(&wallet)
     .bind(&req.game_id)
     .bind(&req.salt)
+    .bind(&req.ruleset_id)
     .execute(st.store.pool())
     .await
     .map_err(ApiError::Database)?;
@@ -1497,6 +1500,142 @@ async fn multi_claim(
         "matchId": id.to_string(),
         "state": "settling",
         "message": "settlement submitted",
+    })))
+}
+
+// ---- death certificates ----------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ExitCertReq {
+    #[serde(default)]
+    #[allow(dead_code)] // deserialized for API compatibility
+    wallet: String,
+    rank: u16,
+    exit_frame: u64,
+    state_hash: String,
+    signature: String,
+}
+
+/// Submit a death certificate: an eliminated player signs their rank,
+/// exit frame, and state hash, then disconnects. Survivors countersign
+/// to verify against their simulation state.
+async fn submit_exit_cert(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ExitCertReq>,
+) -> ApiResult<Json<Value>> {
+    let m = st
+        .store
+        .get_multi_match(id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("match not found".into()))?;
+    if !m.players.iter().any(|p| p.wallet == wallet) {
+        return Err(ApiError::Forbidden("not a participant".into()));
+    }
+    if m.state != "live" && m.state != "quorum" {
+        return Err(ApiError::Conflict(format!(
+            "match is {}, not live",
+            m.state
+        )));
+    }
+
+    // Verify the EIP-191 signature over the exit message.
+    let message = format!(
+        "AMP exit certificate\n\nMatch: {}\nRank: {}\nExit frame: {}\nState hash: {}\n\nThis signature is free. It certifies your elimination and unlocks your reporting bond.",
+        id, req.rank, req.exit_frame, req.state_hash
+    );
+    let recovered = crate::auth::recover_eip191(message.as_bytes(), &req.signature)
+        .map_err(|e| ApiError::BadRequest(format!("bad exit signature: {e}")))?;
+    if format!("{recovered:#x}").to_lowercase() != wallet {
+        return Err(ApiError::BadRequest(
+            "signature does not match wallet".into(),
+        ));
+    }
+
+    // Insert the certificate.
+    let res = sqlx::query(
+        r#"INSERT INTO amp_exit_certs (match_id, wallet, rank, exit_frame, state_hash, signature)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (match_id, wallet) DO NOTHING"#,
+    )
+    .bind(id)
+    .bind(&wallet)
+    .bind(req.rank as i32)
+    .bind(req.exit_frame as i64)
+    .bind(&req.state_hash)
+    .bind(&req.signature)
+    .execute(st.store.pool())
+    .await
+    .map_err(ApiError::Database)?;
+
+    Ok(Json(json!({
+        "matchId": id.to_string(),
+        "recorded": res.rows_affected() == 1,
+        "message": "exit certificate recorded — reporting bond unlockable at settlement",
+    })))
+}
+
+#[derive(Deserialize)]
+struct CountersignReq {
+    state_hash: String,
+}
+
+/// A surviving player countersigns an exit certificate, verifying the
+/// eliminated player's state hash against their own simulation.
+async fn countersign_exit(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Path((id, cert_wallet)): Path<(Uuid, String)>,
+    Json(req): Json<CountersignReq>,
+) -> ApiResult<Json<Value>> {
+    let m = st
+        .store
+        .get_multi_match(id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("match not found".into()))?;
+    if !m.players.iter().any(|p| p.wallet == wallet) {
+        return Err(ApiError::Forbidden("not a participant".into()));
+    }
+
+    // Fetch the existing certificate.
+    let row = sqlx::query(
+        "SELECT state_hash, countersigned_by FROM amp_exit_certs WHERE match_id = $1 AND wallet = $2",
+    )
+    .bind(id)
+    .bind(&cert_wallet)
+    .fetch_optional(st.store.pool())
+    .await
+    .map_err(ApiError::Database)?
+    .ok_or_else(|| ApiError::NotFound("exit certificate not found".into()))?;
+
+    let existing_hash: String = sqlx::Row::get(&row, "state_hash");
+    if existing_hash != req.state_hash {
+        return Err(ApiError::BadRequest(
+            "state hash mismatch — certificate not verified".into(),
+        ));
+    }
+
+    // Add the countersigner.
+    let mut signed_by: Vec<String> =
+        sqlx::Row::get::<Option<serde_json::Value>, _>(&row, "countersigned_by")
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+    if !signed_by.contains(&wallet) {
+        signed_by.push(wallet.clone());
+    }
+    sqlx::query("UPDATE amp_exit_certs SET countersigned_by = $3::jsonb WHERE match_id = $1 AND wallet = $2")
+        .bind(id)
+        .bind(&cert_wallet)
+        .bind(serde_json::to_string(&signed_by).unwrap())
+        .execute(st.store.pool())
+        .await
+        .map_err(ApiError::Database)?;
+
+    Ok(Json(json!({
+        "matchId": id.to_string(),
+        "certified": cert_wallet,
+        "countersigners": signed_by.len(),
     })))
 }
 
