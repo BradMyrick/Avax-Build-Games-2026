@@ -17,8 +17,10 @@ import {
   Scale,
 } from "lucide-react";
 import {
+  AMP_SERVER_URL,
   connectWs,
   fetchGames,
+  matchmakerMisconfigured,
   fetchHistory,
   fetchMe,
   joinQueue,
@@ -249,6 +251,20 @@ export default function ArenaPage() {
       <div className="absolute bottom-0 -right-1/4 w-[150%] h-[400px] bg-brand-red/10 blur-[120px] rounded-full pointer-events-none" />
 
       <div className="relative z-10 max-w-3xl mx-auto px-6 py-12">
+        {/* Build-time configuration failure: the site shipped with the
+            localhost fallback for the matchmaker URL. */}
+        {matchmakerMisconfigured() && (
+          <div className="mb-6 rounded-2xl border border-brand-red/40 bg-brand-red/10 px-5 py-4 text-sm text-red-200">
+            <p className="font-bold mb-1">Matchmaker not configured</p>
+            <p className="text-red-200/90">
+              This build points at <code>{AMP_SERVER_URL}</code>. Set{" "}
+              <code>NEXT_PUBLIC_AMP_SERVER_URL</code> to your deployed
+              amp-server URL in your hosting provider and <strong>trigger a
+              rebuild</strong> (the variable is embedded at build time).
+            </p>
+          </div>
+        )}
+
         {/* Header */}
         <div className="flex items-center justify-between mb-10">
           <Link href="/" className="flex items-center gap-3 group">

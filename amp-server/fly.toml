@@ -1,0 +1,40 @@
+# Fly.io config for amp-server — the matchmaker.
+# Deploy from the REPO ROOT:  fly deploy -c amp-server/fly.toml
+# Region iad = US East (same as the relayer; near Neon + Fuji RPC).
+#
+# After first deploy, set secrets:
+#   flyctl secrets set -a amp-server \
+#     DATABASE_URL="postgresql://..." \
+#     AMP_VERIFIER_KEY="0x..." \
+#     AMP_SETTLEMENT_ADDRESS="0x78ec93e66255a74873d20DD62C6595A389272126" \
+#     AMP_REGISTRY_ADDRESS="0xf6B0eA6c88c574c4BbEAdC186AAfe72C43C2cDc2" \
+#     AMP_ADMIN_TOKEN="..."
+#
+# Then point the website at it:
+#   Vercel → NEXT_PUBLIC_AMP_SERVER_URL="https://amp-server.<your>.fly.dev"
+#   and REDEPLOY the web (NEXT_PUBLIC_* is embedded at build time).
+
+app = "amp-server"
+primary_region = "iad"
+
+[build]
+  dockerfile = "amp-server/Dockerfile"
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  # WebSocket support: Fly terminates TLS and proxies upgrades natively.
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

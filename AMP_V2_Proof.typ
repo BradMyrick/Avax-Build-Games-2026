@@ -530,6 +530,55 @@ All contract deployments live on the Avalanche *Fuji testnet*. Nothing is deploy
   Pure Rust core implementing `party.rs`, team/FFA/BR queue topologies, commitments and the blockhash shuffle, and
   canonical Glicko-2 field updates.
 
+
+#v(0.3cm)
+// The appendix returns to full width: the cross-reference table needs it.
+#columns(1)[
+  = Appendix: Theorem-to-Implementation Cross-Reference
+
+Every theorem, state, and invariant in this document, mapped to the contract function or library routine that
+implements it and the automated gate that exercises it. Contract references are to `AMPMultiplayer.sol` unless
+prefixed; library references are to `amp-match-core` (Rust).
+
+#block(
+  width: 100%,
+  stroke: 0.5pt + rgb("#cbd5e1"),
+  radius: 2pt,
+  inset: 1pt,
+  breakable: false,
+  [
+    #set text(size: 6.9pt)
+    #table(
+      columns: (0.95fr, 0.95fr, 1.1fr),
+      stroke: 0.3pt + rgb("#e2e8f0"),
+      fill: (col, row) => if row == 0 { rgb("#f1f5f9") } else { none },
+      inset: 3pt,
+      align: (left, left, left),
+      table.header([*Claim (this doc)*], [*Implementation site*], [*Automated gate*]),
+      [Def. 1 --- quorum threshold $K$], [`quorumOf()`], [`test_LobbyFillsAndTransitionsToReady` (asserts $K = 6$ at $N = 8$)],
+      [Thm. 1 --- non-equivocation], [`_verifyLadderQuorum` sig recovery + terminal `State.Settled`], [`test_SettlementIsTerminal` (conflicting quorum post-settle reverts); `test_MisattributedSignatureRejected`],
+      [Inv. 1 --- remainder $rho$], [`claimFees()` treasury branch: `settledNetPool − tierTotal`], [`test_QuorumSettlement_Pays_Fees_Bonds` (dust to reserve, conservation exact)],
+      [Thm. 2, State 1 `Settled`], [`settleMultiplayer` → `_settleAndRecord`; payouts via `claimPayout` / `claimFees`], [`test_QuorumSettlement_Pays_Fees_Bonds`; `invariant_TerminalStateDrainsExactly`],
+      [Thm. 2, State 2 `TimeoutClaim`], [`unilateralClaim` → `finalizeGraceWith` (claimant-only signer record)], [`test_GraceClaim_Finalizes_Unchallenged` ($N-1$ bonds slashed); `test_GraceClaim_RequiresRankOneSigner`; `test_GraceWindow_ClaimBeforeQuorumLapse_Rejected`],
+      [Thm. 2, State 3 `FundingExpired`], [`cancelLobby` (refunds joined set only)], [`test_CancelUnfilledRefundsDeposits`],
+      [Thm. 2, State 4 `SilenceRefund`], [`expireRefund`], [`test_ExpireRefund_AfterTotalSilence`],
+      [Thm. 2, State 5 `DisputeResolved`], [`challengeClaim` → `resolveDispute` → `_payoutDispute`], [`test_Dispute_ChallengersWin_SlashClaimant`; `test_Dispute_ClaimantWins_SlashChallengers`; `test_Dispute_VerdictMustMatchWinnerLadder`],
+      [Thm. 2 --- conservation (all states)], [pull-only `claimable` ledger + `withdraw`], [`invariant_BalanceCoversCredits`; `invariant_TerminalStateDrainsExactly` (256 runs × 128k calls); per-state exact asserts in each unit test above],
+      [Thm. 3 --- permutation invariance], [`amp-match-core: glicko2_update_vs_many` (canonical bit-pattern sort)], [`rating_updates_are_permutation_invariant` (10k-case fuzz, incl. blockhash-shuffle permutation); `vs_many_is_order_invariant`],
+      [Thm. 4 --- timeout dominance], [State-2 slash rule in `_settleAndRecord` (non-signer bonds 50/50)], [grace tests above; payoff structure asserted in `test_GraceClaim_Finalizes_Unchallenged`],
+      [Thm. 5 --- allocation uniformity], [`amp-match-core: commit.rs shuffle_by_blockhash` (Lemire debiasing)], [`shuffle_is_a_permutation`; `below_is_within_bounds_and_spread` (7k draws/bucket); `shuffle_is_deterministic_per_blockhash`],
+      [Pull-accounting (DoS isolation)], [`withdraw` isolated per player], [`test_WithdrawIsolatedFromRevertingReceiver`],
+      [Gas bounds (§7)], [`settleMultiplayer` (O(1) storage; lazy claims)], [`test_QuorumGasBound_At_N8_Under_250k` (152,962); `test_GasProfile_N16` (195,844); `test_GasProfile_BR64` (404,021)],
+    )
+  ],
+)
+#text(size: 7pt, fill: rgb("#64748b"))[
+  Contract: `contracts/src/AMPMultiplayer.sol`, deployed at the address in §8. Tests: `contracts/test/AMPMultiplayer.t.sol`,
+  `contracts/test/AMPMultiplayer.invariants.t.sol`, `amp-match-core/tests/fuzz_gates.rs`. Gas figures are measured
+  (optimizer_runs = 64, via_ir).
+]
+]
+
 #v(0.2cm)
 #block(
   width: 100%,
