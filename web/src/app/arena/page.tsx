@@ -70,6 +70,7 @@ export default function ArenaPage() {
   const [matchView, setMatchView] = useState<MatchFoundView | null>(null);
   const [resultView, setResultView] = useState<ResultView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [offline, setOffline] = useState(false);
   const [busy, setBusy] = useState(false);
   const [history, setHistory] = useState<Record<string, unknown>[]>([]);
   const disconnectWs = useRef<(() => void) | null>(null);
@@ -108,17 +109,24 @@ export default function ArenaPage() {
     }
   }, []);
 
+  const boot = useCallback(async () => {
+    try {
+      await refreshGames();
+    } catch {
+      setOffline(true);
+      return; // stay in loading; the offline panel renders
+    }
+    if (storedSession()) {
+      await refreshMe();
+    } else {
+      setPhase("loggedOut");
+    }
+  }, [refreshGames, refreshMe]);
+
   // Boot: session? games? me?
   useEffect(() => {
-    (async () => {
-      await refreshGames();
-      if (storedSession()) {
-        await refreshMe();
-      } else {
-        setPhase("loggedOut");
-      }
-    })();
-  }, [refreshGames, refreshMe]);
+    boot();
+  }, [boot]);
 
   // Live event wire (also drives the local wait timer).
   useEffect(() => {
@@ -310,26 +318,50 @@ export default function ArenaPage() {
     (r) => selected && r.gameId === selected.gameId && r.rulesetId === selected.rulesetId,
   );
 
+  // Misconfiguration detection must happen post-hydration (it reads
+  // window.location.hostname — SSR has no window, so checking during render
+  // causes hydration mismatches).
+  const [misconfigured, setMisconfigured] = useState(false);
+  useEffect(() => {
+    if (matchmakerMisconfigured()) {
+      setMisconfigured(true);
+      console.error(
+        `[AMP] Matchmaker misconfigured: build targets ${AMP_SERVER_URL}. ` +
+          "Set NEXT_PUBLIC_AMP_SERVER_URL before the next build.",
+      );
+    }
+  }, []);
+
   return (
     <div className="min-h-screen bg-black text-white antialiased">
       <div className="absolute top-0 -left-1/4 w-[150%] h-[400px] bg-brand-cyan/10 blur-[120px] rounded-full pointer-events-none" />
       <div className="absolute bottom-0 -right-1/4 w-[150%] h-[400px] bg-brand-red/10 blur-[120px] rounded-full pointer-events-none" />
 
       <div className="relative z-10 max-w-3xl mx-auto px-6 py-12">
-        {/* Build-time configuration failure: the site shipped with the
-            localhost fallback for the matchmaker URL. */}
-        {matchmakerMisconfigured() && (
-          <div className="mb-6 rounded-2xl border border-brand-red/40 bg-brand-red/10 px-5 py-4 text-sm text-red-200">
-            <p className="font-bold mb-1">Matchmaker not configured</p>
-            <p className="text-red-200/90">
-              This build points at <code>{AMP_SERVER_URL}</code>. Set{" "}
-              <code>NEXT_PUBLIC_AMP_SERVER_URL</code> to your deployed
-              amp-server URL in your hosting provider and <strong>trigger a
-              rebuild</strong> (the variable is embedded at build time).
+        {/* Misconfigured build: visitors see a clean coming-soon page;
+            the technical detail is in the browser console only. */}
+        {misconfigured && (
+          <div className="glass-panel rounded-3xl border border-brand-cyan/20 p-10 text-center">
+            <span className="inline-block rounded-full border border-yellow-400/40 bg-yellow-400/10 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-yellow-400 mb-4">
+              Coming Soon
+            </span>
+            <h2 className="text-2xl font-black uppercase tracking-tight mb-3">
+              Ranked matchmaking is almost here
+            </h2>
+            <p className="text-zinc-400 max-w-md mx-auto">
+              The arena is being prepared. Check back soon to connect your
+              wallet, queue up, and climb the ladder.
             </p>
+            <Link
+              href="/"
+              className="inline-flex items-center gap-2 mt-6 text-sm text-brand-cyan hover:underline"
+            >
+              Back to home
+            </Link>
           </div>
         )}
-
+        {!misconfigured && (
+          <>
         {/* Header */}
         <div className="flex items-center justify-between mb-10">
           <Link href="/" className="flex items-center gap-3 group">
@@ -365,11 +397,32 @@ export default function ArenaPage() {
           </div>
         )}
 
-        {/* Loading */}
-        {phase === "loading" && (
+        {/* Loading / offline */}
+        {phase === "loading" && !offline && (
           <div className="flex flex-col items-center py-24 text-zinc-400">
             <RefreshCw className="w-8 h-8 animate-spin mb-4" />
             Connecting to the matchmaker…
+          </div>
+        )}
+        {phase === "loading" && offline && (
+          <div className="glass-panel rounded-3xl border border-yellow-500/30 bg-yellow-500/5 p-10 text-center">
+            <span className="inline-block rounded-full border border-yellow-500/40 bg-yellow-500/10 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-yellow-400 mb-4">
+              Maintenance
+            </span>
+            <h2 className="text-2xl font-black uppercase tracking-tight mb-3">
+              Matchmaking is offline
+            </h2>
+            <p className="text-zinc-400 max-w-md mx-auto mb-6">
+              The matchmaker isn&apos;t reachable right now. Ranked play will
+              be back shortly — nothing is at risk, your rating and history
+              are safe.
+            </p>
+            <button
+              onClick={() => { setOffline(false); boot(); }}
+              className="inline-flex items-center gap-2 border border-white/15 hover:border-brand-cyan/50 text-zinc-200 px-6 py-3 rounded-2xl transition-colors"
+            >
+              <RefreshCw className="w-4 h-4" /> Retry
+            </button>
           </div>
         )}
 
@@ -675,6 +728,8 @@ export default function ArenaPage() {
               arbitration — you will be notified here when it resolves.
             </p>
           </div>
+        )}
+          </>
         )}
       </div>
     </div>
