@@ -91,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/queue/join", post(queue_join))
         .route("/v1/queue/leave", post(queue_leave))
         .route("/v1/queue/status", get(queue_status))
+        .route("/v1/queue/play-bot", post(play_bot_now))
         .route("/v1/matches/{id}/report", post(report_outcome))
         .route("/v1/matches/{id}", get(get_match))
         .route("/v1/matches/history", get(history))
@@ -497,6 +498,111 @@ async fn queue_status(
         }))),
         None => Ok(Json(json!({ "queued": false }))),
     }
+}
+
+// ---- play-bot-now ----------------------------------------------------------------------
+
+/// Skip the queue wait and play a bot immediately. Leaves the queue if
+/// queued, creates a practice match, sends the match_found WS event.
+async fn play_bot_now(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+) -> ApiResult<Json<Value>> {
+    // Leave the queue if queued.
+    if let Some(t) = st
+        .store
+        .active_ticket(&wallet)
+        .await
+        .map_err(ApiError::Database)?
+    {
+        st.store
+            .cancel_ticket(t.id, &wallet)
+            .await
+            .map_err(ApiError::Database)?;
+    }
+    st.queue.leave(&wallet);
+
+    // Build the player's entry from their rating.
+    let rating = st
+        .store
+        .get_rating(&wallet, "amp-tactics", "ranked-1v1")
+        .await
+        .map_err(ApiError::Database)?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let entry = crate::queue::QueueEntry {
+        ticket_id: uuid::Uuid::new_v4(),
+        stake_wei: 0,
+        canonical_ruleset: "ranked-1v1".into(),
+        ticket: amp_match_core::PlayerTicket {
+            player_id: wallet.clone(),
+            game_id: "amp-tactics".into(),
+            ruleset_id: "ranked-1v1".into(),
+            mmr: rating.rating as f32,
+            mmr_uncertainty: rating.rating_deviation as f32,
+            region: "na".into(),
+            preferred_role: String::new(),
+            language: "en".into(),
+            max_ping_ms: 150,
+            enqueued_at_ms: now_ms,
+            party_size: 1,
+        },
+    };
+
+    // Build the house bot entry at a similar rating.
+    let mut house = crate::queue::QueueEntry {
+        ticket_id: uuid::Uuid::new_v4(),
+        stake_wei: 0,
+        canonical_ruleset: "ranked-1v1".into(),
+        ticket: entry.ticket.clone(),
+    };
+    house.ticket.player_id = st
+        .cfg
+        .house_wallet
+        .clone()
+        .map(|w| w.to_lowercase())
+        .or_else(|| {
+            st.verifier
+                .as_ref()
+                .map(|v| format!("{:#x}", v.address()).to_lowercase())
+        })
+        .unwrap_or_else(|| "0x0000000000000000000000000000000000000000".into());
+
+    let m = st
+        .matches
+        .create_match("amp-tactics", "ranked-1v1", &entry, &house, true)
+        .await?;
+    st.live_matches
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    // Send the match_found event with bot flag.
+    let bot_wallet = house.ticket.player_id.clone();
+    st.hub.send(
+        &wallet,
+        "match_found",
+        serde_json::json!({
+            "matchId": m.id.to_string(),
+            "gameId": m.game_id,
+            "rulesetId": m.ruleset_id,
+            "bot": true,
+            "opponent": {
+                "wallet": bot_wallet,
+                "rating": entry.ticket.mmr,
+                "region": "house",
+            },
+            "yourRating": entry.ticket.mmr,
+            "expiresAt": m.expires_at.to_rfc3339(),
+        }),
+    );
+
+    Ok(Json(json!({
+        "matchId": m.id.to_string(),
+        "bot": true,
+        "message": "playing the house bot",
+    })))
 }
 
 // ---- matches --------------------------------------------------------------------
