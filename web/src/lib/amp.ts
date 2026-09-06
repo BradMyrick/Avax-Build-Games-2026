@@ -10,6 +10,24 @@
 const SERVER_URL =
   process.env.NEXT_PUBLIC_AMP_SERVER_URL || "http://localhost:8080";
 
+export const AMP_SERVER_URL = SERVER_URL;
+
+/**
+ * True when the page is served from a public host but the SDK still points
+ * at localhost — i.e. NEXT_PUBLIC_AMP_SERVER_URL was not set (or not set
+ * before the build that shipped). NEXT_PUBLIC_* vars are INLINED AT BUILD
+ * TIME, so adding one in Vercel requires a redeploy.
+ */
+export function matchmakerMisconfigured(): boolean {
+  if (typeof window === "undefined") return false;
+  const site = window.location.hostname;
+  const localSite =
+    site === "localhost" || site === "127.0.0.1" || site.endsWith(".local");
+  const localServer =
+    SERVER_URL.includes("://localhost") || SERVER_URL.includes("://127.0.0.1");
+  return !localSite && localServer;
+}
+
 const TOKEN_KEY = "amp_session_token";
 const WALLET_KEY = "amp_session_wallet";
 
@@ -66,11 +84,24 @@ async function api<T>(
     const s = storedSession();
     if (s) headers.Authorization = `Bearer ${s.token}`;
   }
-  const res = await fetch(`${SERVER_URL}${path}`, {
-    method: opts.method || "GET",
-    headers,
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${SERVER_URL}${path}`, {
+      method: opts.method || "GET",
+      headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch {
+    throw new ApiError(
+      "network",
+      `Could not reach the matchmaker at ${SERVER_URL}. ${
+        matchmakerMisconfigured()
+          ? "This site was built without NEXT_PUBLIC_AMP_SERVER_URL — set it and redeploy."
+          : "Check that the AMP matchmaker is online."
+      }`,
+      0,
+    );
+  }
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new ApiError(

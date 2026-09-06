@@ -127,3 +127,4 @@ anvil.log
 secrets/
 /amp-sdk/cpp/build-tests/
 /amp-sdk/cpp/build-cpp-tests/
+amp-server/.env

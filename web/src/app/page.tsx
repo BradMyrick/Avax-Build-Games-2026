@@ -89,10 +89,13 @@ export default function Home() {
           <div className="flex flex-col sm:flex-row gap-6 mb-24">
             <Link
               href="/arena"
-              className="px-8 py-4 rounded-sm font-bold text-black bg-brand-cyan hover:bg-white transition-all flex items-center justify-center gap-2 shadow-[0_0_30px_rgba(0,229,255,0.5)] hover:shadow-[0_0_50px_rgba(0,229,255,0.8)] hover:-translate-y-1 transform duration-300 uppercase tracking-widest text-sm border-b-4 border-brand-dark-cyan active:border-b-0 active:translate-y-1"
+              className="group relative px-8 py-4 rounded-sm font-bold text-black bg-brand-cyan hover:bg-white transition-all flex items-center justify-center gap-2 shadow-[0_0_30px_rgba(0,229,255,0.5)] hover:shadow-[0_0_50px_rgba(0,229,255,0.8)] hover:-translate-y-1 transform duration-300 uppercase tracking-widest text-sm border-b-4 border-brand-dark-cyan active:border-b-0 active:translate-y-1"
             >
               <Rocket className="w-5 h-5 text-black" />
               Play Ranked — Free
+              <span className="absolute -top-2.5 -right-2.5 rounded-full bg-black border border-yellow-400/60 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-yellow-400 group-hover:scale-105 transition-transform">
+                Beta
+              </span>
             </Link>
             <Link
               href="/setup"
