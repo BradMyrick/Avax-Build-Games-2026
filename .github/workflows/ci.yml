@@ -2,9 +2,9 @@ name: AMP CI
 
 on:
   push:
-    branches: [main, protocol-resurrection]
+    branches: [main]
   pull_request:
-    branches: [main, protocol-resurrection]
+    branches: [main]
 
 env:
   RUST_BACKTRACE: 1
