@@ -375,6 +375,82 @@ fn apply_backfill(
 
 /// Hardcoded inter-region ping estimates. Same-region: 20 ms; cross-region:
 /// pairs of {na, eu, sa, as} range from 90-250 ms; unknown region: 150 ms.
+/// Evaluate a **party-vs-party** pairing (team match). Skill, region,
+/// language, and latency constraints are evaluated on the parties'
+/// aggregate tickets (see [`crate::party::Party::aggregate_ticket`]);
+/// team-balance rules additionally inspect member-role composition —
+/// role coverage and duplicate caps across the *combined* match roster.
+///
+/// This is the N-player entry point: two parties of any size, evaluated
+/// with the same ruleset machinery the 1v1 path uses.
+pub fn evaluate_parties(
+    party_a: &crate::party::Party,
+    party_b: &crate::party::Party,
+    skill_method: crate::types::PartySkillMethod,
+    ruleset: &Arc<crate::types::RuleSet>,
+) -> RuleEvaluationResult {
+    let agg_a = party_a.aggregate_ticket(skill_method);
+    let agg_b = party_b.aggregate_ticket(skill_method);
+
+    // Base evaluation on the aggregates — reuses the full rule chain.
+    let mut result = evaluate_rules(&agg_a, &agg_b, ruleset);
+
+    // Team-balance refinement on real member roles: score how well the
+    // combined roster covers required_roles and respects max_duplicates.
+    for rule in &ruleset.rules {
+        if let crate::types::RuleParams::TeamBalance(params) = &rule.params {
+            if params.required_roles.is_empty() {
+                continue;
+            }
+            let role_score = combined_role_score(params, party_a, party_b);
+            // Hard gate: duplicates beyond the cap fail the pairing.
+            let over_cap = combined_role_duplicates(party_a, party_b)
+                .into_iter()
+                .any(|(_, n)| n as u8 > params.max_duplicates.max(1));
+            if over_cap {
+                result.passes = false;
+            }
+            let weight = rule.weight.clamp(0.0, 1.0);
+            result.quality.role_balance =
+                result.quality.role_balance * (1.0 - weight) + role_score * weight;
+            result.quality.total_score += weight * role_score;
+        }
+    }
+    result
+}
+
+/// Fraction of `required_roles` covered by the combined roster.
+fn combined_role_score(
+    params: &TeamBalanceParams,
+    a: &crate::party::Party,
+    b: &crate::party::Party,
+) -> f32 {
+    if params.required_roles.is_empty() {
+        return 1.0;
+    }
+    let covered = params
+        .required_roles
+        .iter()
+        .filter(|r| {
+            a.members.iter().any(|m| &m.preferred_role == *r)
+                || b.members.iter().any(|m| &m.preferred_role == *r)
+        })
+        .count();
+    covered as f32 / params.required_roles.len() as f32
+}
+
+/// Count of each role across the combined roster.
+fn combined_role_duplicates(
+    a: &crate::party::Party,
+    b: &crate::party::Party,
+) -> Vec<(String, usize)> {
+    let mut counts = std::collections::HashMap::new();
+    for m in a.members.iter().chain(b.members.iter()) {
+        *counts.entry(m.preferred_role.clone()).or_insert(0usize) += 1;
+    }
+    counts.into_iter().collect()
+}
+
 pub fn estimate_ping(region_a: &str, region_b: &str) -> f32 {
     if region_a == region_b {
         return 20.0;

@@ -12,7 +12,7 @@ pub type GameId = String;
 ///
 /// In the AMP server, [`crate::QueueEntry`] wraps this with a notification
 /// sender; library users use `PlayerTicket` directly.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlayerTicket {
     pub player_id: String,
     pub game_id: String,

@@ -72,13 +72,14 @@
 //! ```
 
 pub mod glicko2;
+pub mod party;
 pub mod queue;
 pub mod rules;
 pub mod types;
 
-pub use glicko2::glicko2_update;
+pub use glicko2::{glicko2_update, glicko2_update_vs_many};
 pub use queue::{MatchOutcome, MatchQueue};
-pub use rules::{RuleEvaluationResult, evaluate_rules};
+pub use rules::{RuleEvaluationResult, evaluate_parties, evaluate_rules};
 pub use types::{
     AvoidanceParams, BackfillPolicy, ConnectionQualityParams, CustomParams, InventoryParams,
     LanguageParams, LatencyParams, MatchQualityDetail, PartyParams, PartySkillMethod,

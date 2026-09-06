@@ -190,6 +190,64 @@ impl<T: AsRef<PlayerTicket>> MatchQueue<T> {
         None
     }
 
+    /// Free-for-all fill: assemble one match of up to `slots` entries from
+    /// the bucket. The lowest-MMR entry anchors; every additional entry
+    /// must fall inside the anchor's skill window AND pass rule evaluation
+    /// against the anchor. Returns None until `slots` compatible entries
+    /// exist (no partial FFA matches — a 5-of-8 lobby is a bad lobby).
+    ///
+    /// Team matches should use [`MatchQueue::try_match_bucket`] on party
+    /// aggregate tickets instead; FFA fill is for battle-royale-style
+    /// lobbies where everyone is everyone's opponent.
+    pub fn try_match_bucket_ffa(
+        &mut self,
+        key: &BucketKey,
+        ruleset: &Arc<RuleSet>,
+        slots: usize,
+        max_active: usize,
+        current_active: usize,
+    ) -> Option<Vec<T>> {
+        if slots < 2 || current_active >= max_active {
+            return None;
+        }
+        let bucket = self.buckets.get_mut(key)?;
+        if bucket.len() < slots {
+            return None;
+        }
+
+        // Anchor = first (lowest MMR) entry.
+        let anchor = &bucket[0];
+        let anchor_mmr = anchor.as_ref().mmr;
+        let hi = anchor_mmr + ruleset.max_skill_diff;
+
+        let mut chosen: Vec<usize> = vec![0];
+        for (j, candidate) in bucket.iter().enumerate().skip(1) {
+            if chosen.len() >= slots {
+                break;
+            }
+            if candidate.as_ref().mmr > hi {
+                break; // sorted by MMR — no further fit
+            }
+            let result = evaluate_rules(anchor.as_ref(), candidate.as_ref(), ruleset);
+            if result.passes {
+                chosen.push(j);
+            }
+        }
+
+        if chosen.len() < slots {
+            return None;
+        }
+
+        // Remove chosen entries highest-index-first to keep indices valid.
+        chosen.sort_unstable_by(|a, b| b.cmp(a));
+        let mut taken = Vec::with_capacity(slots);
+        for j in chosen {
+            taken.push(bucket.remove(j));
+        }
+        self.total_count = self.total_count.saturating_sub(slots);
+        Some(taken)
+    }
+
     pub fn bucket_keys(&self) -> Vec<BucketKey> {
         self.buckets.keys().cloned().collect()
     }
@@ -353,5 +411,81 @@ mod tests {
                 prop_assert!(m.entry_a.player_id != m.entry_b.player_id);
             }
         }
+    }
+    // ---- free-for-all fill --------------------------------------------------
+
+    fn ffa_entry(id: &str, mmr: f32) -> PlayerTicket {
+        PlayerTicket {
+            player_id: id.into(),
+            game_id: "g".into(),
+            ruleset_id: "ffa".into(),
+            mmr,
+            mmr_uncertainty: 100.0,
+            region: "na".into(),
+            preferred_role: String::new(),
+            language: "en".into(),
+            max_ping_ms: 150,
+            enqueued_at_ms: 1_000,
+        }
+    }
+
+    #[test]
+    fn ffa_fills_only_with_slots_available() {
+        let mut q: MatchQueue<PlayerTicket> = MatchQueue::new();
+        let rs = RuleSet::default_arc();
+        for i in 0..3 {
+            q.push(ffa_entry(&format!("p{i}"), 1500.0 + i as f32 * 10.0));
+        }
+        // 3 queued, 4 slots wanted → no match.
+        assert!(
+            q.try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 4, 100, 0)
+                .is_none()
+        );
+        // 2 slots → immediate match, one player left over.
+        let taken = q
+            .try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 2, 100, 0)
+            .unwrap();
+        assert_eq!(taken.len(), 2);
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn ffa_respects_skill_window() {
+        let mut q: MatchQueue<PlayerTicket> = MatchQueue::new();
+        let rs = RuleSet::default_arc(); // max_skill_diff 500
+        q.push(ffa_entry("anchor", 1500.0));
+        q.push(ffa_entry("near", 1600.0));
+        q.push(ffa_entry("far", 2600.0)); // +1100 → outside window
+        let taken = q.try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 3, 100, 0);
+        assert!(
+            taken.is_none(),
+            "far player must block the fill, not be skipped"
+        );
+        // With only compatible entries the fill completes.
+        let mut q2: MatchQueue<PlayerTicket> = MatchQueue::new();
+        q2.push(ffa_entry("anchor", 1500.0));
+        q2.push(ffa_entry("near", 1600.0));
+        q2.push(ffa_entry("near2", 1700.0));
+        let taken = q2
+            .try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 3, 100, 0)
+            .unwrap();
+        assert_eq!(taken.len(), 3);
+        assert_eq!(q2.len(), 0);
+    }
+
+    #[test]
+    fn ffa_rejects_singleton_slots_and_capacity() {
+        let mut q: MatchQueue<PlayerTicket> = MatchQueue::new();
+        let rs = RuleSet::default_arc();
+        q.push(ffa_entry("a", 1500.0));
+        q.push(ffa_entry("b", 1500.0));
+        assert!(
+            q.try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 1, 100, 0)
+                .is_none()
+        );
+        assert!(
+            q.try_match_bucket_ffa(&("g".into(), "ffa".into()), &rs, 2, 1, 1)
+                .is_none()
+        );
     }
 }
