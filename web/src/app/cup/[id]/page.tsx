@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { CUP_ADDRESS, EXPLORER_URL } from "@/lib/ampCup";
 import {
   ArrowLeft,
   Crown,
