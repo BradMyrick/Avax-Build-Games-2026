@@ -88,7 +88,7 @@ export default function InvestorCTA() {
                   brad@kodr.pro
                 </Link>
                 <Link
-                  href="https://docs.page/bradmyrick/Avalanche-Matchmaking-Protocol"
+                  href="/docs"
                   target="_blank"
                   className="px-8 py-4 rounded-sm font-bold text-brand-cyan glass-panel hover:bg-brand-cyan/10 hover:border-brand-cyan/50 transition-colors flex items-center justify-center gap-2 uppercase tracking-widest text-sm border-b-4 border-transparent"
                 >

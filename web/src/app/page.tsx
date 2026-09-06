@@ -174,7 +174,7 @@ export default function Home() {
             <Link href="https://github.com/bradmyrick/Avalanche-Matchmaking-Protocol" className="hover:text-brand-cyan transition-colors">GitHub</Link>
             <Link href="mailto:brad@kodr.pro" className="hover:text-brand-cyan transition-colors">Contact</Link>
             <Link href="/terms" className="hover:text-brand-cyan transition-colors">Terms</Link>
-            <Link href="https://docs.page/bradmyrick/Avalanche-Matchmaking-Protocol" target="_blank" className="hover:text-brand-cyan transition-colors">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-cyan transition-colors">Docs</Link>
           </div>
         </div>
       </footer>
