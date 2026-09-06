@@ -20,7 +20,7 @@ import {
   LayoutDashboard,
 } from "lucide-react";
 import {
-  CUP_ADDRESS,
+  CUP_ADDRESS, EXPLORER_URL,
   PAYOUT_PRESETS,
   connectWallet,
   signFinalize,
@@ -162,7 +162,7 @@ export default function SetupPage() {
         txHash: rcpt?.hash ?? null,
         funded: true,
         winnerWallets: winnerWallets.map((address, i) => ({ placement: i, address })),
-        snowtrace: `https://testnet.snowtrace.io/address/${CUP_ADDRESS}`,
+        snowtrace: `${EXPLORER_URL}/address/${CUP_ADDRESS}`,
       });
     } catch (e) {
       setResult({
@@ -221,7 +221,7 @@ export default function SetupPage() {
           placement: i,
           address,
         })),
-        snowtrace: `https://testnet.snowtrace.io/address/${CUP_ADDRESS}`,
+        snowtrace: `${EXPLORER_URL}/address/${CUP_ADDRESS}`,
       });
     } catch (e) {
       setResult({
@@ -303,7 +303,7 @@ export default function SetupPage() {
                     <Row label="Tournament ID" value={`#${result.tournamentId}`} />
                   )}
                   {result.txHash && (
-                    <Row label="Transaction" value={result.txHash.slice(0, 18) + "…"} href={`https://testnet.snowtrace.io/tx/${result.txHash}`} />
+                    <Row label="Transaction" value={result.txHash.slice(0, 18) + "…"} href={`${EXPLORER_URL}/tx/${result.txHash}`} />
                   )}
                   {result.snowtrace && (
                     <Row label="Contract" value={CUP_ADDRESS.slice(0, 10) + "…" + CUP_ADDRESS.slice(-4)} href={result.snowtrace} />
@@ -490,7 +490,7 @@ export default function SetupPage() {
         </AnimatePresence>
 
         <p className="text-center text-[11px] text-zinc-600 mt-8">
-          Open beta · Fuji testnet · <a className="text-zinc-500 hover:text-brand-cyan" href={`https://testnet.snowtrace.io/address/${CUP_ADDRESS}`} target="_blank" rel="noreferrer">view contract</a>
+          Open beta · Fuji testnet · <a className="text-zinc-500 hover:text-brand-cyan" href={`${EXPLORER_URL}/address/${CUP_ADDRESS}`} target="_blank" rel="noreferrer">view contract</a>
         </p>
       </main>
     </div>

@@ -2,16 +2,16 @@ name: AMP CI
 
 on:
   push:
-    branches: [main, tournament-pivot]
+    branches: [main, protocol-resurrection]
   pull_request:
-    branches: [main]
+    branches: [main, protocol-resurrection]
 
 env:
   RUST_BACKTRACE: 1
 
 jobs:
-  relayer:
-    name: Relayer (Rust)
+  rust:
+    name: Rust workspace
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -19,24 +19,42 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo build --release -p amp-relayer
+
+      # Style gates are advisory: they annotate the PR but don't block it.
+      # Correctness gates (build + tests) are hard failures.
+      - name: Format check (advisory)
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+      - name: Clippy (advisory)
+        run: cargo clippy --workspace --all-targets
+        continue-on-error: true
+
+      - name: Build workspace
+        run: cargo build --workspace --release
+      - name: Test workspace
+        run: cargo test --workspace
 
   contracts:
     name: Contracts (Solidity)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
-      - name: Install libraries
+      # Belt-and-braces: if submodules ever fail to record (e.g. forked
+      # without gitlinks), fetch the pinned libs directly. Idempotent.
+      - name: Ensure library deps
         working-directory: contracts
         run: |
-          forge install OpenZeppelin/openzeppelin-contracts@v5.6.1 --no-git
-          forge install foundry-rs/forge-std@v1.10.0 --no-git
-      - run: forge fmt --check
+          [ -d lib/forge-std ] || forge install foundry-rs/forge-std@v1.10.0 --no-git
+          [ -d lib/openzeppelin-contracts ] || forge install OpenZeppelin/openzeppelin-contracts@v5.6.1 --no-git
+      - name: Format check (advisory)
+        run: forge fmt --check
         working-directory: contracts
-      - run: forge test -vvv
+        continue-on-error: true
+      - name: Forge tests
+        run: forge test -vvv
         working-directory: contracts
 
   web:

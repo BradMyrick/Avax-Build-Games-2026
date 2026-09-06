@@ -131,7 +131,9 @@ contract AMPRegistryTest is Test {
         address[] memory recipients = new address[](0);
         uint256[] memory amounts = new uint256[](0);
         vm.expectRevert(AMPRegistry.InvalidNewState.selector);
-        registry.settleMatch(matchId, AMPTypes.MatchState.OPEN, address(0), recipients, amounts, 0);
+        address[2] memory feeRecipients = [address(0), address(0)];
+        uint256[2] memory feeAmounts = [uint256(0), uint256(0)];
+        registry.settleMatch(matchId, AMPTypes.MatchState.OPEN, feeRecipients, feeAmounts, recipients, amounts);
     }
 
     function testCancelMatch() public {

@@ -33,6 +33,10 @@ contract AMPRegistry is Ownable2Step, Pausable, ReentrancyGuard {
     error MatchAlreadyExists();
     error InvalidSettlementAddress();
     error InvalidNewState();
+    error InvalidStudioFee();
+    error TotalFeeTooHigh();
+
+    uint16 public constant MAX_STUDIO_FEE_BPS = 500; // 5%
 
     address public settlement;
     uint256 public nextGameId;
@@ -53,6 +57,7 @@ contract AMPRegistry is Ownable2Step, Pausable, ReentrancyGuard {
     event FeesWithdrawn(address indexed token, uint256 amount, address indexed wallet);
     event SettlementUpdated(address indexed settlementAddress);
     event WithdrawalClaimed(address indexed token, address indexed account, uint256 amount);
+    event StudioFeeUpdated(uint256 indexed gameId, uint16 feeBps, address indexed recipient);
 
     modifier onlySettlement() {
         if (msg.sender != settlement) revert NotSettlement();
@@ -80,11 +85,26 @@ contract AMPRegistry is Ownable2Step, Pausable, ReentrancyGuard {
             minStake: minStake,
             stakeToken: stakeToken,
             arbiter: arbiter,
-            matchTimeout: 1 hours
+            matchTimeout: 1 hours,
+            studioFeeBps: 0,
+            studioFeeRecipient: address(0)
         });
         _syncVerifierMapping(gameId, verifiers);
 
         emit GameRegistered(gameId, msg.sender, mode);
+    }
+
+    /// Fee-split router: the game's studio sets its rake share and payout
+    /// address. Combined studio + protocol fees are capped at
+    /// MAX_TOTAL_FEE_BPS so a studio can never price players out.
+    function setStudioFee(uint256 gameId, uint16 feeBps, address recipient) external {
+        AMPTypes.Game storage game = games[gameId];
+        if (msg.sender != game.admin) revert NotGameAdmin();
+        if (feeBps > MAX_STUDIO_FEE_BPS) revert InvalidStudioFee();
+        if (feeBps > 0 && recipient == address(0)) revert InvalidStudioFee();
+        game.studioFeeBps = feeBps;
+        game.studioFeeRecipient = recipient;
+        emit StudioFeeUpdated(gameId, feeBps, recipient);
     }
 
     function setMatchTimeout(uint256 gameId, uint256 timeoutSeconds) external {
@@ -246,13 +266,15 @@ contract AMPRegistry is Ownable2Step, Pausable, ReentrancyGuard {
         emit SettlementUpdated(settlementAddress);
     }
 
+    /// Two-slot fee routing: [0] = studio rake recipient, [1] = protocol
+    /// treasury. Zero-address slots accrue to the Registry owner's fee pot.
     function settleMatch(
         uint256 matchId,
         AMPTypes.MatchState newState,
-        address feeRecipient,
+        address[2] calldata feeRecipients,
+        uint256[2] calldata feeAmounts,
         address[] calldata recipients,
-        uint256[] calldata amounts,
-        uint256 protocolFee
+        uint256[] calldata amounts
     ) external onlySettlement nonReentrant {
         AMPTypes.Match storage m = matches[matchId];
         if (
@@ -271,15 +293,14 @@ contract AMPRegistry is Ownable2Step, Pausable, ReentrancyGuard {
         AMPTypes.Game storage game = games[m.gameId];
         address token = game.stakeToken;
 
-        // Protocol fees route to the Settlement-configured `feeRecipient` when
-        // set, otherwise accrue to the Registry owner's fee pot (release
-        // Phase 3.1 — previously `protocolFeeRecipient` was dead code and fees
-        // always went to the Registry owner regardless of the documented API).
-        if (protocolFee > 0) {
-            if (feeRecipient != address(0)) {
-                pendingWithdrawals[token][feeRecipient] += protocolFee;
-            } else {
-                feeBalances[token] += protocolFee;
+        for (uint256 i = 0; i < 2; i++) {
+            uint256 fee = feeAmounts[i];
+            if (fee > 0) {
+                if (feeRecipients[i] != address(0)) {
+                    pendingWithdrawals[token][feeRecipients[i]] += fee;
+                } else {
+                    feeBalances[token] += fee;
+                }
             }
         }
 

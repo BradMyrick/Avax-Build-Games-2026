@@ -416,4 +416,150 @@ contract AMPSettlementTest is Test {
         assertEq(registry.pendingWithdrawals(address(token), playerA), 0.99 ether);
         assertEq(registry.pendingWithdrawals(address(token), playerB), 0.9801 ether);
     }
+
+    // ---- fee-split router ---------------------------------------------------
+
+    address public studio = address(0x77);
+
+    function _setupAsyncGameWithStudioFee(uint16 studioBps) internal returns (uint256 matchId) {
+        address[] memory verifiers = new address[](1);
+        verifiers[0] = verifierPubKey;
+        vm.prank(admin);
+        uint256 gameId =
+            registry.registerGame(AMPTypes.SettlementMode.ASYNC_VERIFIER, verifiers, 1 ether, address(0), address(0));
+        vm.prank(admin);
+        registry.setStudioFee(gameId, studioBps, studio);
+        matchId = 777;
+        vm.prank(playerA);
+        registry.createMatch{value: 1 ether}(gameId, matchId, 1 ether);
+        vm.prank(playerB);
+        registry.joinMatch{value: 1 ether}(matchId);
+    }
+
+    function testFeeSplitRoutesStudioAndProtocol() public {
+        // studio 200 bps (2%), protocol default 100 bps (1%) on a 2-ether pool:
+        // studio 0.04, protocol 0.02, winner 1.94.
+        uint256 matchId = _setupAsyncGameWithStudioFee(200);
+        bytes memory signature =
+            _signResult(matchId, AMPTypes.OutcomeCode.WIN_A, bytes32(uint256(0x9)), verifierPrivKey);
+        AMPTypes.AsyncResult memory result = AMPTypes.AsyncResult({
+            matchId: matchId,
+            outcome: AMPTypes.OutcomeCode.WIN_A,
+            transcriptHash: bytes32(uint256(0x9)),
+            signature: signature
+        });
+        vm.prank(nonPlayer);
+        settlement.submitAsyncResult(matchId, result);
+
+        assertEq(registry.pendingWithdrawals(address(0), studio), 0.04 ether, "studio rake");
+        assertEq(registry.pendingWithdrawals(address(0), settlement.protocolFeeRecipient()), 0.02 ether, "protocol fee");
+        assertEq(registry.pendingWithdrawals(address(0), playerA), 1.94 ether, "winner payout");
+        assertEq(registry.pendingWithdrawals(address(0), playerB), 0, "loser payout");
+    }
+
+    function testFeeSplitRTModeAlsoSplits() public {
+        address[] memory verifiers = new address[](1);
+        verifiers[0] = verifierPubKey;
+        vm.prank(admin);
+        uint256 gameId =
+            registry.registerGame(AMPTypes.SettlementMode.RT_HASH_AGREE, verifiers, 1 ether, address(0), admin);
+        vm.prank(admin);
+        registry.setStudioFee(gameId, 300, studio);
+        uint256 matchId = 778;
+        vm.prank(playerA);
+        registry.createMatch{value: 1 ether}(gameId, matchId, 1 ether);
+        vm.prank(playerB);
+        registry.joinMatch{value: 1 ether}(matchId);
+
+        AMPTypes.RealTimeHashResult memory r = AMPTypes.RealTimeHashResult({
+            matchId: matchId, outcome: AMPTypes.OutcomeCode.DRAW, transcriptHash: bytes32(uint256(0xa))
+        });
+        vm.prank(playerA);
+        settlement.submitRealTimeHashResult(matchId, r);
+        vm.prank(playerB);
+        settlement.submitRealTimeHashResult(matchId, r);
+
+        // studio 3% = 0.06, protocol 1% = 0.02, players split 1.92 → 0.96 each.
+        assertEq(registry.pendingWithdrawals(address(0), studio), 0.06 ether, "studio rake");
+        assertEq(registry.pendingWithdrawals(address(0), settlement.protocolFeeRecipient()), 0.02 ether, "protocol");
+        assertEq(registry.pendingWithdrawals(address(0), playerA), 0.96 ether);
+        assertEq(registry.pendingWithdrawals(address(0), playerB), 0.96 ether);
+    }
+
+    function testCancelRefundsTakeNoFees() public {
+        uint256 matchId = _setupAsyncGameWithStudioFee(200);
+        bytes memory signature =
+            _signResult(matchId, AMPTypes.OutcomeCode.CANCELLED, bytes32(uint256(0x9)), verifierPrivKey);
+        AMPTypes.AsyncResult memory result = AMPTypes.AsyncResult({
+            matchId: matchId,
+            outcome: AMPTypes.OutcomeCode.CANCELLED,
+            transcriptHash: bytes32(uint256(0x9)),
+            signature: signature
+        });
+        vm.prank(nonPlayer);
+        settlement.submitAsyncResult(matchId, result);
+
+        assertEq(registry.pendingWithdrawals(address(0), studio), 0, "no studio rake on cancel");
+        assertEq(
+            registry.pendingWithdrawals(address(0), settlement.protocolFeeRecipient()), 0, "no protocol fee on cancel"
+        );
+        assertEq(registry.pendingWithdrawals(address(0), playerA), 1 ether, "full refund A");
+        assertEq(registry.pendingWithdrawals(address(0), playerB), 1 ether, "full refund B");
+    }
+
+    function testTotalFeeCapReverts() public {
+        address[] memory verifiers = new address[](1);
+        verifiers[0] = verifierPubKey;
+        vm.prank(admin);
+        uint256 gameId =
+            registry.registerGame(AMPTypes.SettlementMode.ASYNC_VERIFIER, verifiers, 1 ether, address(0), address(0));
+        vm.prank(admin);
+        registry.setStudioFee(gameId, 301, studio);
+        vm.prank(settlement.owner());
+        settlement.updateProtocolFeeBps(500); // 500 + 301 > 800 combined cap
+
+        uint256 matchId = 779;
+        vm.prank(playerA);
+        registry.createMatch{value: 1 ether}(gameId, matchId, 1 ether);
+        vm.prank(playerB);
+        registry.joinMatch{value: 1 ether}(matchId);
+
+        bytes memory signature =
+            _signResult(matchId, AMPTypes.OutcomeCode.WIN_A, bytes32(uint256(0x9)), verifierPrivKey);
+        AMPTypes.AsyncResult memory result = AMPTypes.AsyncResult({
+            matchId: matchId,
+            outcome: AMPTypes.OutcomeCode.WIN_A,
+            transcriptHash: bytes32(uint256(0x9)),
+            signature: signature
+        });
+        vm.prank(nonPlayer);
+        vm.expectRevert(AMPSettlement.TotalFeeTooHigh.selector);
+        settlement.submitAsyncResult(matchId, result);
+    }
+
+    function testStudioFeeSetterAuthAndBounds() public {
+        address[] memory verifiers = new address[](1);
+        verifiers[0] = verifierPubKey;
+        vm.prank(admin);
+        uint256 gameId =
+            registry.registerGame(AMPTypes.SettlementMode.ASYNC_VERIFIER, verifiers, 1 ether, address(0), address(0));
+
+        vm.prank(nonPlayer);
+        vm.expectRevert(AMPRegistry.NotGameAdmin.selector);
+        registry.setStudioFee(gameId, 100, studio);
+
+        vm.prank(admin);
+        vm.expectRevert(AMPRegistry.InvalidStudioFee.selector);
+        registry.setStudioFee(gameId, 501, studio); // over per-game cap
+
+        vm.prank(admin);
+        vm.expectRevert(AMPRegistry.InvalidStudioFee.selector);
+        registry.setStudioFee(gameId, 100, address(0)); // needs recipient
+
+        vm.prank(admin);
+        registry.setStudioFee(gameId, 500, studio); // max allowed
+        (,,,,,, uint16 bps, address recipient) = registry.games(gameId);
+        assertEq(bps, 500);
+        assertEq(recipient, studio);
+    }
 }

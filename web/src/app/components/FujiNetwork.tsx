@@ -1,4 +1,5 @@
 "use client";
+import { EXPLORER_URL, FUJI_RPC, CUP_ADDRESS } from "@/lib/ampCup";
 import React, { useState, useEffect } from 'react';
 import { ExternalLink, Hash, Activity, ShieldCheck, RefreshCw, Coins } from 'lucide-react';
 import { ethers } from 'ethers';
@@ -14,8 +15,6 @@ const FALLBACK_TXS: TxDisplay[] = [
 ];
 
 // Live contract on Fuji — the sponsored-prize tournament escrow.
-const CUP_ADDRESS = "0x7c743c1c9ae3e7a65d030098f2249b7787d66dff";
-
 export default function FujiNetwork() {
     const [transactions, setTransactions] = useState<TxDisplay[]>(() => {
         if (typeof window === 'undefined') return FALLBACK_TXS;
@@ -27,7 +26,7 @@ export default function FujiNetwork() {
         const fetchLogs = async () => {
             try {
                 // Use public Fuji RPC for on-chain live data
-                const provider = new ethers.JsonRpcProvider("https://api.avax-test.network/ext/bc/C/rpc");
+                const provider = new ethers.JsonRpcProvider(FUJI_RPC);
                 const currentBlock = await provider.getBlockNumber();
 
                 // Fetch in chunks to respect Fuji RPC 2048-block limit
@@ -137,7 +136,7 @@ export default function FujiNetwork() {
                     </div>
 
                     <a
-                        href="https://testnet.snowtrace.io"
+                        href={EXPLORER_URL}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="flex items-center gap-2 text-brand-cyan hover:underline font-medium mb-2"
@@ -156,12 +155,12 @@ export default function FujiNetwork() {
                             </div>
                             <div className="text-[11px] text-zinc-500 mb-3">Live · sponsor-funded prize pools · 2% protocol fee</div>
                             <a
-                                href="https://testnet.snowtrace.io/address/0x7c743c1c9ae3e7a65d030098f2249b7787d66dff"
+                                href={`${EXPLORER_URL}/address/${CUP_ADDRESS}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="bg-black/40 rounded-lg p-3 flex items-center justify-between border border-white/5 hover:border-yellow-400/40 transition-colors group"
                             >
-                                <code className="text-xs text-brand-cyan group-hover:text-yellow-400">0x7c743c1c...66dff</code>
+                                <code className="text-xs text-brand-cyan group-hover:text-yellow-400">{CUP_ADDRESS.slice(0, 10)}…{CUP_ADDRESS.slice(-4)}</code>
                                 <Hash className="w-3 h-3 text-zinc-600" />
                             </a>
                         </div>
@@ -216,7 +215,7 @@ export default function FujiNetwork() {
 
                         <div className="mt-6 pt-6 border-t border-white/5 text-center">
                                 <a
-                                href="https://testnet.snowtrace.io/address/0x7c743c1c9ae3e7a65d030098f2249b7787d66dff"
+                                href={`${EXPLORER_URL}/address/${CUP_ADDRESS}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="text-sm font-medium text-yellow-400 hover:text-brand-cyan transition-colors"

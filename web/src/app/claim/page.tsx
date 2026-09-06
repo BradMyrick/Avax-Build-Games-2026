@@ -12,7 +12,7 @@ import {
   ExternalLink,
   Coins,
 } from "lucide-react";
-import { CUP_ADDRESS, connectWallet, AMPCUP_ABI } from "@/lib/ampCup";
+import { CUP_ADDRESS, connectWallet, AMPCUP_ABI, FUJI_RPC, EXPLORER_URL } from "@/lib/ampCup";
 
 type Mode = "wallet" | "key";
 type Status = "idle" | "claiming" | "done" | "error";
@@ -54,7 +54,7 @@ function ClaimContent() {
           throw new Error("Enter a valid 0x-prefixed 32-byte private key.");
         }
         const provider = new ethers.JsonRpcProvider(
-          "https://api.avax-test.network/ext/bc/C/rpc"
+          FUJI_RPC
         );
         signer = new ethers.Wallet(privateKey, provider);
       }
@@ -184,7 +184,7 @@ function ClaimContent() {
               {payout && <p className="text-sm text-zinc-300">+{payout} AVAX</p>}
               {txHash && (
                 <a
-                  href={`https://testnet.snowtrace.io/tx/${txHash}`}
+                  href={`${EXPLORER_URL}/tx/${txHash}`}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-1 text-xs text-brand-cyan hover:underline mt-2"
@@ -203,7 +203,7 @@ function ClaimContent() {
         </div>
 
         <p className="text-center text-[11px] text-zinc-600 mt-6">
-          Open beta · Fuji testnet · <a className="text-zinc-500 hover:text-brand-cyan" href={`https://testnet.snowtrace.io/address/${CUP_ADDRESS}`} target="_blank" rel="noreferrer">view contract</a>
+          Open beta · Fuji testnet · <a className="text-zinc-500 hover:text-brand-cyan" href={`${EXPLORER_URL}/address/${CUP_ADDRESS}`} target="_blank" rel="noreferrer">view contract</a>
         </p>
       </main>
     </div>

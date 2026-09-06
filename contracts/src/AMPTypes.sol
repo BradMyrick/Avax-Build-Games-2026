@@ -31,6 +31,10 @@ library AMPTypes {
         address stakeToken;
         address arbiter;
         uint256 matchTimeout;
+        // Fee-split router: studio rake share of the pool, paid to
+        // studioFeeRecipient on every settled (non-cancelled) match.
+        uint16 studioFeeBps;
+        address studioFeeRecipient;
     }
 
     struct Match {
