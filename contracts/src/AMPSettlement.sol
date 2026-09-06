@@ -18,7 +18,9 @@ interface IAMPRegistry {
             uint256 minStake,
             address stakeToken,
             address arbiter,
-            uint256 matchTimeout
+            uint256 matchTimeout,
+            uint16 studioFeeBps,
+            address studioFeeRecipient
         );
 
     function getGameVerifiers(uint256 id) external view returns (address[] memory);
@@ -34,10 +36,10 @@ interface IAMPRegistry {
     function settleMatch(
         uint256 matchId,
         AMPTypes.MatchState newState,
-        address feeRecipient,
+        address[2] calldata feeRecipients,
+        uint256[2] calldata feeAmounts,
         address[] calldata recipients,
-        uint256[] calldata amounts,
-        uint256 protocolFee
+        uint256[] calldata amounts
     ) external;
 }
 
@@ -52,6 +54,7 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
     error NotArbiter();
     error NotDisputed();
     error NotAPlayer();
+    error TotalFeeTooHigh();
     error InvalidOutcome();
 
     address public immutable registry;
@@ -77,6 +80,7 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
     }
 
     uint16 public constant MAX_PROTOCOL_FEE_BPS = 500;
+    uint16 public constant MAX_TOTAL_FEE_BPS = 800; // studio + protocol combined (hard policy)
 
     function updateProtocolFeeBps(uint16 feeBps) external onlyOwner {
         if (feeBps > MAX_PROTOCOL_FEE_BPS) revert FeeExceedsMax();
@@ -107,7 +111,7 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
             uint256 stakeAmountB
         ) = IAMPRegistry(registry).matches(matchId);
 
-        (, AMPTypes.SettlementMode mode,,,,) = IAMPRegistry(registry).games(gameId);
+        (, AMPTypes.SettlementMode mode,,,,,,) = IAMPRegistry(registry).games(gameId);
 
         if (mode != AMPTypes.SettlementMode.ASYNC_VERIFIER) revert WrongMode();
         if (state != AMPTypes.MatchState.READY) revert MatchNotSettlable();
@@ -124,7 +128,7 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
             matchId: matchId, outcome: result.outcome, transcriptHash: result.transcriptHash, settledAt: block.timestamp
         });
 
-        _payout(matchId, playerA, playerB, stakeAmount, stakeAmountB, result.outcome);
+        _payout(matchId, gameId, playerA, playerB, stakeAmount, stakeAmountB, result.outcome);
 
         emit MatchSettled(matchId, result.outcome, stakeAmount + stakeAmountB);
     }
@@ -145,7 +149,7 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
             uint256 stakeAmountB
         ) = IAMPRegistry(registry).matches(matchId);
 
-        (, AMPTypes.SettlementMode mode,,,,) = IAMPRegistry(registry).games(gameId);
+        (, AMPTypes.SettlementMode mode,,,,,,) = IAMPRegistry(registry).games(gameId);
 
         if (mode != AMPTypes.SettlementMode.RT_HASH_AGREE) revert WrongMode();
         if (state != AMPTypes.MatchState.READY) revert MatchNotSettlable();
@@ -165,13 +169,15 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
                     settledAt: block.timestamp
                 });
 
-                _payout(matchId, playerA, playerB, stakeAmount, stakeAmountB, result.outcome);
+                _payout(matchId, gameId, playerA, playerB, stakeAmount, stakeAmountB, result.outcome);
                 emit MatchSettled(matchId, result.outcome, stakeAmount + stakeAmountB);
             } else {
                 address[] memory recipients = new address[](0);
                 uint256[] memory amounts = new uint256[](0);
+                address[2] memory noFees = [address(0), address(0)];
+                uint256[2] memory noAmounts = [uint256(0), uint256(0)];
                 IAMPRegistry(registry)
-                    .settleMatch(matchId, AMPTypes.MatchState.DISPUTED, address(0), recipients, amounts, 0);
+                    .settleMatch(matchId, AMPTypes.MatchState.DISPUTED, noFees, noAmounts, recipients, amounts);
                 emit MatchDisputed(matchId);
             }
         }
@@ -188,7 +194,7 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
             uint256 stakeAmountB
         ) = IAMPRegistry(registry).matches(matchId);
 
-        (,,,, address arbiter,) = IAMPRegistry(registry).games(gameId);
+        (,,,, address arbiter,,,) = IAMPRegistry(registry).games(gameId);
 
         if (state != AMPTypes.MatchState.DISPUTED) revert NotDisputed();
         if (msg.sender != arbiter) revert NotArbiter();
@@ -198,7 +204,7 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
             matchId: matchId, outcome: enforcedOutcome, transcriptHash: bytes32(0), settledAt: block.timestamp
         });
 
-        _payout(matchId, playerA, playerB, stakeAmount, stakeAmountB, enforcedOutcome);
+        _payout(matchId, gameId, playerA, playerB, stakeAmount, stakeAmountB, enforcedOutcome);
         emit MatchDisputeResolved(matchId, enforcedOutcome);
         emit MatchSettled(matchId, enforcedOutcome, stakeAmount + stakeAmountB);
     }
@@ -220,6 +226,7 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
 
     function _payout(
         uint256 matchId,
+        uint256 gameId,
         address playerA,
         address playerB,
         uint256 stakeAmount,
@@ -229,7 +236,7 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
         // F1 fix: NONE (enum 0) is the "no result" sentinel and is never a
         // valid settlement outcome. Without this guard the if/else chain below
         // would fall through, marking the match SETTLED while crediting both
-        // players 0 and silently trapping ~99% of the pool permanently.
+        // players 0 and silently trapping funds permanently.
         if (outcome == AMPTypes.OutcomeCode.NONE) revert InvalidOutcome();
 
         uint256 totalPool = stakeAmount + stakeAmountB;
@@ -237,8 +244,20 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
             totalPool = stakeAmount;
         }
 
-        uint256 protocolFee = (totalPool * protocolFeeBps) / 10000;
-        uint256 payoutAmount = totalPool - protocolFee;
+        // Fee-split router: studio rake + protocol treasury, enforced to a
+        // combined cap so a misconfigured game can never confiscate the pool.
+        (,,,,,, uint16 studioBps, address studioRecipient) = IAMPRegistry(registry).games(gameId);
+        if (uint256(studioBps) + uint256(protocolFeeBps) > MAX_TOTAL_FEE_BPS) revert TotalFeeTooHigh();
+
+        uint256 studioFee;
+        if (outcome != AMPTypes.OutcomeCode.CANCELLED && studioBps > 0 && studioRecipient != address(0)) {
+            studioFee = (totalPool * studioBps) / 10000;
+        }
+        uint256 protocolFee;
+        if (outcome != AMPTypes.OutcomeCode.CANCELLED) {
+            protocolFee = (totalPool * protocolFeeBps) / 10000;
+        }
+        uint256 payoutAmount = totalPool - studioFee - protocolFee;
 
         address[] memory recipients = new address[](2);
         recipients[0] = playerA;
@@ -256,6 +275,7 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
             amounts[1] = payoutAmount - amounts[0];
         } else if (outcome == AMPTypes.OutcomeCode.CANCELLED) {
             protocolFee = 0;
+            studioFee = 0;
             // Fee-on-transfer safe: refund each player exactly what they staked.
             amounts[0] = stakeAmount;
             amounts[1] = playerB == address(0) ? 0 : stakeAmountB;
@@ -265,7 +285,9 @@ contract AMPSettlement is Ownable2Step, Pausable, EIP712, ReentrancyGuard {
             revert InvalidOutcome();
         }
 
+        address[2] memory feeRecipients = [studioRecipient, protocolFeeRecipient];
+        uint256[2] memory feeAmounts = [studioFee, protocolFee];
         IAMPRegistry(registry)
-            .settleMatch(matchId, AMPTypes.MatchState.SETTLED, protocolFeeRecipient, recipients, amounts, protocolFee);
+            .settleMatch(matchId, AMPTypes.MatchState.SETTLED, feeRecipients, feeAmounts, recipients, amounts);
     }
 }

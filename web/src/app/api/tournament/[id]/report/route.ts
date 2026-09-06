@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getStore, type BracketState } from "@/lib/store";
+import { getStore, validateBodySize, type BracketState } from "@/lib/store";
 import { Tournament, Outcome, TournamentState, type TournamentFormat } from "@/lib/engine";
 import { ethers } from "ethers";
 
@@ -31,6 +31,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  if (validateBodySize(request)) return validateBodySize(request)!;
   const tid = Number(id);
   if (!Number.isFinite(tid)) return NextResponse.json({ error: "bad id" }, { status: 400 });
 

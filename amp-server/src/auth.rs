@@ -16,7 +16,18 @@ use crate::config::Config;
 use crate::error::ApiError;
 use crate::store::Store;
 
-pub const CHALLENGE_PREFIX: &str = "AMP_AUTH:v1";
+/// The single line a machine needs from the human-readable challenge.
+pub const NONCE_MARKER: &str = "Nonce: ";
+
+/// Build the wallet-facing sign-in message. Human-readable on purpose:
+/// opaque `PREFIX:uuid` blobs read exactly like wallet-drainer prompts in
+/// MetaMask — a clear, free, no-transaction statement builds user trust and
+/// keeps heuristic reviewers from ever flagging the domain.
+pub fn challenge_message(site_name: &str, nonce: &str) -> String {
+    format!(
+        "Sign in to {site_name}\n\nThis signature is free. It sends no transactions\nand moves no funds — it only proves you own this wallet.\n\n{NONCE_MARKER}{nonce}"
+    )
+}
 const CHALLENGE_TTL_SECS: i64 = 300;
 const MAX_OUTSTANDING_PER_WALLET: i64 = 5;
 
@@ -24,6 +35,7 @@ const MAX_OUTSTANDING_PER_WALLET: i64 = 5;
 pub struct AuthService {
     store: Store,
     session_ttl_hours: i64,
+    site_name: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -34,10 +46,11 @@ pub struct Player {
 }
 
 impl AuthService {
-    pub fn new(store: Store, session_ttl_hours: i64) -> Self {
+    pub fn new(store: Store, session_ttl_hours: i64, site_name: String) -> Self {
         Self {
             store,
             session_ttl_hours,
+            site_name,
         }
     }
 
@@ -57,7 +70,7 @@ impl AuthService {
             ));
         }
         let nonce = uuid::Uuid::new_v4().to_string();
-        let message = format!("{CHALLENGE_PREFIX}:{nonce}");
+        let message = challenge_message(&self.site_name, &nonce);
         let expires_at = Utc::now() + Duration::seconds(CHALLENGE_TTL_SECS);
         self.store
             .insert_challenge(&nonce, &wallet, expires_at)
@@ -181,8 +194,9 @@ pub fn normalize_wallet(input: &str) -> Result<String, ApiError> {
 
 fn challenge_nonce(challenge: &str) -> Option<String> {
     challenge
-        .strip_prefix(CHALLENGE_PREFIX)?
-        .strip_prefix(':')
+        .lines()
+        .find(|l| l.starts_with(NONCE_MARKER))?
+        .strip_prefix(NONCE_MARKER)
         .map(str::to_string)
 }
 
@@ -232,7 +246,7 @@ mod tests {
     #[test]
     fn recover_round_trip() {
         let wallet = test_wallet();
-        let msg = format!("{CHALLENGE_PREFIX}:abc123");
+        let msg = challenge_message("AMP Arena", "abc123");
         let sig = sign_eip191(&wallet, msg.as_bytes());
         let recovered = recover_eip191(msg.as_bytes(), &sig).unwrap();
         assert_eq!(
@@ -255,11 +269,12 @@ mod tests {
     #[test]
     fn nonce_extraction() {
         assert_eq!(
-            challenge_nonce("AMP_AUTH:v1:n-123").as_deref(),
+            challenge_nonce(&challenge_message("AMP Arena", "n-123")).as_deref(),
             Some("n-123")
         );
         assert!(challenge_nonce("WRONG:n-123").is_none());
-        assert!(challenge_nonce("AMP_AUTH:v1").is_none());
+        assert!(challenge_nonce("no nonce here at all").is_none());
+        assert!(challenge_message("AMP Arena", "n-1").contains("sends no transactions"));
     }
 
     #[test]

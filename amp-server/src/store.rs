@@ -23,6 +23,8 @@ pub struct TicketRow {
     pub status: String,
     pub match_id: Option<Uuid>,
     pub joined_at: DateTime<Utc>,
+    pub intent_deadline: Option<DateTime<Utc>>,
+    pub intent_sig: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -41,6 +43,9 @@ pub struct MatchRow {
     pub outcome: Option<String>,
     pub attestation: Option<serde_json::Value>,
     pub on_chain_match_id: Option<i64>,
+    pub escrow_game_id: Option<i64>,
+    pub agreed_at: Option<DateTime<Utc>>,
+    pub settle_deadline: Option<DateTime<Utc>>,
     pub bot_match: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -252,8 +257,9 @@ impl Store {
     pub async fn insert_ticket(&self, row: &TicketRow) -> sqlx::Result<()> {
         sqlx::query(
             r#"INSERT INTO amp_queue_tickets
-                   (id, wallet, game_id, ruleset_id, stake_wei, region, status, joined_at)
-               VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7)"#,
+                   (id, wallet, game_id, ruleset_id, stake_wei, region, status, joined_at,
+                    intent_deadline, intent_sig)
+               VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9)"#,
         )
         .bind(row.id)
         .bind(&row.wallet)
@@ -262,6 +268,8 @@ impl Store {
         .bind(row.stake_wei)
         .bind(&row.region)
         .bind(row.joined_at)
+        .bind(row.intent_deadline)
+        .bind(row.intent_sig.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -325,11 +333,19 @@ impl Store {
 
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_match(&self, row: &MatchRow, bot_match: bool) -> sqlx::Result<()> {
+        let state = if bot_match {
+            "live"
+        } else if row.stake_wei > 0 {
+            "escrow_pending"
+        } else {
+            "live"
+        };
         sqlx::query(
             r#"INSERT INTO amp_matches
                    (id, game_id, ruleset_id, stake_wei, state, player_a, player_b,
-                    rating_a_snapshot, rating_b_snapshot, expires_at, bot_match)
-               VALUES ($1, $2, $3, $4, 'live', $5, $6, $7, $8, $9, $10)"#,
+                    rating_a_snapshot, rating_b_snapshot, expires_at, bot_match,
+                    on_chain_match_id, escrow_game_id)
+               VALUES ($1, $2, $3, $4, $11, $5, $6, $7, $8, $9, $10, $12, $13)"#,
         )
         .bind(row.id)
         .bind(&row.game_id)
@@ -341,6 +357,9 @@ impl Store {
         .bind(&row.rating_b_snapshot)
         .bind(row.expires_at)
         .bind(bot_match)
+        .bind(state)
+        .bind(row.on_chain_match_id)
+        .bind(row.escrow_game_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -496,5 +515,69 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+}
+
+impl Store {
+    /// Escrow confirmed on-chain: flip escrow_pending → live and give the
+    /// players a full match window.
+    pub async fn confirm_escrow(&self, id: Uuid, ttl_minutes: i64) -> sqlx::Result<bool> {
+        let res = sqlx::query(
+            r#"UPDATE amp_matches
+               SET state = 'live',
+                   expires_at = now() + make_interval(mins => $2::int)
+               WHERE id = $1 AND state = 'escrow_pending'"#,
+        )
+        .bind(id)
+        .bind(ttl_minutes)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mark_agreed(
+        &self,
+        id: Uuid,
+        state: &str,
+        outcome: &str,
+        winner: Option<&str>,
+        rt_grace_minutes: i64,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"UPDATE amp_matches
+               SET state = $2, outcome = $3, winner = $4,
+                   agreed_at = now(),
+                   settle_deadline = CASE WHEN $2 = 'settling_rt'
+                       THEN now() + make_interval(mins => $5::int) ELSE NULL END
+               WHERE id = $1"#,
+        )
+        .bind(id)
+        .bind(state)
+        .bind(outcome)
+        .bind(winner)
+        .bind(rt_grace_minutes)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Matches that agreed to direct RT settlement but whose window lapsed —
+    /// the relayer fallback picks them up.
+    pub async fn rt_overdue_matches(&self) -> sqlx::Result<Vec<MatchRow>> {
+        sqlx::query_as::<_, MatchRow>(
+            "SELECT * FROM amp_matches WHERE state = 'settling_rt' AND settle_deadline < now()",
+        )
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Escrow windows that lapsed without both players funding.
+    pub async fn expired_escrow_matches(&self) -> sqlx::Result<Vec<MatchRow>> {
+        sqlx::query_as::<_, MatchRow>(
+            "SELECT * FROM amp_matches WHERE state = 'escrow_pending' AND expires_at < now()",
+        )
+        .fetch_all(&self.pool)
+        .await
     }
 }

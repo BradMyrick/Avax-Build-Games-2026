@@ -21,6 +21,7 @@ import {
 } from "@/lib/engine";
 import type { BracketState } from "@/lib/store";
 import { CUP_ADDRESS, AMPCUP_ABI, connectWallet, signFinalize } from "@/lib/ampCup";
+import { EXPLORER_URL } from "@/lib/ampCup";
 
 interface TournamentRecord {
   tournamentId: number;
@@ -224,7 +225,7 @@ export default function ManagePage() {
               </span>
             )}
             <a
-              href={`https://testnet.snowtrace.io/address/${CUP_ADDRESS}`}
+              href={`${EXPLORER_URL}/address/${CUP_ADDRESS}`}
               target="_blank"
               rel="noreferrer"
               className="text-xs text-zinc-400 hover:text-brand-cyan flex items-center gap-1"

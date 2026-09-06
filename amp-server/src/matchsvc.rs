@@ -55,6 +55,38 @@ pub fn reconcile(a: &str, b: &str, reports: &[ReportRow]) -> Option<Outcome> {
 /// The canonical EIP-191 report message a player signs. Byte-exact contract
 /// with the web client and (future) SDKs — changing this breaks evidence
 /// portability.
+/// How a settled match pays out on-chain. Pure — unit-testable.
+pub enum SettleRoute {
+    /// Free match: nothing on-chain, ratings + optional attestation only.
+    None,
+    /// Full RT evidence (both players signed, identical transcript hashes):
+    /// players settle directly via RT_HASH_AGREE; the relayer only acts as
+    /// fallback once the grace window lapses.
+    DirectRt,
+    /// Incomplete evidence: the verifier attests and the relayer settles
+    /// immediately via submitAsyncResult.
+    ImmediateAsync,
+}
+
+pub fn settle_route(m: &MatchRow, reports: &[ReportRow]) -> SettleRoute {
+    if m.stake_wei == 0 {
+        return SettleRoute::None;
+    }
+    let both_signed = reports.len() >= 2 && reports.iter().all(|r| r.signature.is_some());
+    let hashes_agree = match (
+        reports.first().and_then(|r| r.transcript_hash.as_deref()),
+        reports.get(1).and_then(|r| r.transcript_hash.as_deref()),
+    ) {
+        (Some(a), Some(b)) => !a.is_empty() && a == b,
+        _ => false,
+    };
+    if both_signed && hashes_agree {
+        SettleRoute::DirectRt
+    } else {
+        SettleRoute::ImmediateAsync
+    }
+}
+
 pub fn report_message(match_id: &str, result: &str) -> String {
     format!("AMP_REPORT:v1:{match_id}:{result}")
 }
@@ -94,6 +126,9 @@ pub struct RatingDelta {
 pub struct MatchService {
     store: Store,
     match_ttl_minutes: i64,
+    escrow_window_minutes: i64,
+    registry_game_id: u64,
+    rt_grace_minutes: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -106,10 +141,19 @@ pub struct AppliedOutcome {
 }
 
 impl MatchService {
-    pub fn new(store: Store, match_ttl_minutes: i64) -> Self {
+    pub fn new(
+        store: Store,
+        match_ttl_minutes: i64,
+        escrow_window_minutes: i64,
+        registry_game_id: u64,
+        rt_grace_minutes: i64,
+    ) -> Self {
         Self {
             store,
             match_ttl_minutes,
+            escrow_window_minutes,
+            registry_game_id,
+            rt_grace_minutes,
         }
     }
 
@@ -126,17 +170,31 @@ impl MatchService {
         bot_match: bool,
     ) -> Result<MatchRow, ApiError> {
         let id = Uuid::new_v4();
-        let expires_at = Utc::now() + Duration::minutes(self.match_ttl_minutes);
+        let stake = if bot_match {
+            0
+        } else {
+            a.stake_wei.max(b.stake_wei)
+        };
+        // Escrow window for staked pairs, play window otherwise.
+        let expires_at = Utc::now()
+            + Duration::minutes(if stake > 0 {
+                self.escrow_window_minutes
+            } else {
+                self.match_ttl_minutes
+            });
+        // Deterministic on-chain match id for the registry escrow: the UUID's
+        // upper 64 bits (122 bits of v4 randomness available).
+        let on_chain_match_id = (id.as_u128() >> 64) as u64;
         let row = MatchRow {
             id,
             game_id: game_id.to_string(),
             ruleset_id: ruleset_id.to_string(),
-            stake_wei: if bot_match {
-                0
+            stake_wei: stake,
+            state: if stake > 0 {
+                "escrow_pending".into()
             } else {
-                a.stake_wei.max(b.stake_wei)
+                "live".into()
             },
-            state: "live".into(),
             player_a: a.ticket.player_id.clone(),
             player_b: b.ticket.player_id.clone(),
             rating_a_snapshot: rating_json(a.ticket.mmr, a.ticket.mmr_uncertainty),
@@ -144,7 +202,18 @@ impl MatchService {
             winner: None,
             outcome: None,
             attestation: None,
-            on_chain_match_id: None,
+            on_chain_match_id: if stake > 0 {
+                Some(on_chain_match_id as i64)
+            } else {
+                None
+            },
+            escrow_game_id: if stake > 0 {
+                Some(self.registry_game_id as i64)
+            } else {
+                None
+            },
+            agreed_at: None,
+            settle_deadline: None,
             bot_match: Some(bot_match),
             created_at: Utc::now(),
             expires_at,
@@ -208,6 +277,7 @@ impl MatchService {
     /// Apply an agreed outcome: update both Glicko-2 profiles from the
     /// pre-match snapshots, persist, sign the attestation, and (for staked
     /// matches) enqueue settlement.
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply_outcome(
         &self,
         m: &MatchRow,
@@ -216,6 +286,7 @@ impl MatchService {
         signer: Option<&alloy_signer_local::PrivateKeySigner>,
         chain_id: u64,
         settlement: Option<alloy_primitives::Address>,
+        reports: &[ReportRow],
     ) -> Result<AppliedOutcome, ApiError> {
         let (ra, rda, _va) = rating_parts(&m.rating_a_snapshot);
         let (rb, rdb, _vb) = rating_parts(&m.rating_b_snapshot);
@@ -234,8 +305,20 @@ impl MatchService {
             Outcome::Draw => None,
         };
 
+        let route = settle_route(m, reports);
+        let defer_settlement = matches!(route, SettleRoute::DirectRt);
+        let terminal_state = match route {
+            SettleRoute::DirectRt => "settling_rt",
+            _ => "agreed",
+        };
         self.store
-            .set_match_outcome(m.id, "agreed", outcome_str(outcome), winner.as_deref())
+            .mark_agreed(
+                m.id,
+                terminal_state,
+                outcome_str(outcome),
+                winner.as_deref(),
+                self.rt_grace_minutes,
+            )
             .await
             .map_err(ApiError::Database)?;
 
@@ -278,6 +361,7 @@ impl MatchService {
             signer,
             chain_id,
             settlement,
+            defer_settlement,
         )
         .await?;
 
@@ -324,6 +408,7 @@ async fn sign_and_store(
     signer: Option<&alloy_signer_local::PrivateKeySigner>,
     chain_id: u64,
     settlement: Option<alloy_primitives::Address>,
+    defer_settlement: bool,
 ) -> Result<Option<serde_json::Value>, ApiError> {
     let (Some(signer), Some(settlement)) = (signer, settlement) else {
         return Ok(None);
@@ -356,8 +441,10 @@ async fn sign_and_store(
         .map_err(ApiError::Database)?;
 
     // Staked + on-chain: hand off to the relayer for settlement (bps rake
-    // is taken by the contract itself).
-    if m.stake_wei > 0 && m.on_chain_match_id.is_some() {
+    // is taken by the contract itself). Deferred when the players hold full
+    // RT evidence — they get the grace window to settle directly; the sweep
+    // enqueues this same job as fallback if they don't.
+    if !defer_settlement && m.stake_wei > 0 && m.on_chain_match_id.is_some() {
         let payload = serde_json::json!({
             "matchUuid": m.id.to_string(),
             "onChainMatchId": on_chain_id,

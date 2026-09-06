@@ -36,6 +36,20 @@ pub struct Config {
     /// Scheduled prime-time queue windows per game, UTC "HH:MM" list:
     /// [{"gameId":"amp-tactics","timesUtc":["18:00","21:00"]}]
     pub queue_windows: Vec<QueueWindow>,
+    /// Read-only RPC for escrow verification (defaults to Fuji public RPC).
+    pub rpc_url: String,
+    /// AMPRegistry address — escrow target for staked matches.
+    pub registry_address: Option<String>,
+    /// Registry game id our catalog maps to (operator registers the game).
+    pub registry_game_id: u64,
+    /// Window players have to fund escrow after pairing before the match
+    /// is cancelled (minutes).
+    pub escrow_window_minutes: i64,
+    /// Grace period for direct RT settlement before the relayer takes over
+    /// (minutes).
+    pub rt_grace_minutes: i64,
+    /// Public site name rendered inside the wallet's sign-in message.
+    pub site_name: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -126,6 +140,31 @@ impl Config {
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default(),
+            rpc_url: std::env::var("AMP_RPC_URL")
+                .ok()
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| "https://api.avax-test.network/ext/bc/C/rpc".into()),
+            registry_address: std::env::var("AMP_REGISTRY_ADDRESS")
+                .ok()
+                .filter(|a| !a.is_empty()),
+            registry_game_id: std::env::var("AMP_REGISTRY_GAME_ID")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            escrow_window_minutes: std::env::var("AMP_ESCROW_WINDOW_MINUTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&m| m >= 1)
+                .unwrap_or(10),
+            rt_grace_minutes: std::env::var("AMP_RT_GRACE_MINUTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&m| m >= 1)
+                .unwrap_or(30),
+            site_name: std::env::var("AMP_SITE_NAME")
+                .ok()
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "AMP Arena".into()),
         })
     }
 }

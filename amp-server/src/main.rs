@@ -14,7 +14,9 @@ mod attest;
 mod auth;
 mod config;
 mod error;
+mod escrow;
 mod http;
+mod intent;
 mod matchsvc;
 mod queue;
 mod store;
@@ -74,8 +76,18 @@ async fn main() -> anyhow::Result<()> {
 
     let queue = Arc::new(QueueService::new(Arc::clone(&cfg)));
     let hub = Arc::new(WsHub::new());
-    let auth = Arc::new(AuthService::new(store.clone(), cfg.session_ttl_hours));
-    let matches = Arc::new(MatchService::new(store.clone(), cfg.match_ttl_minutes));
+    let auth = Arc::new(AuthService::new(
+        store.clone(),
+        cfg.session_ttl_hours,
+        cfg.site_name.clone(),
+    ));
+    let matches = Arc::new(MatchService::new(
+        store.clone(),
+        cfg.match_ttl_minutes,
+        cfg.escrow_window_minutes,
+        cfg.registry_game_id,
+        cfg.rt_grace_minutes,
+    ));
     let live_matches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // The house opponent for cold-start practice matches. Defaults to the
@@ -115,9 +127,11 @@ async fn main() -> anyhow::Result<()> {
             .get_rating(&t.wallet, &t.game_id, &t.ruleset_id)
             .await?;
         let joined_ms = t.joined_at.timestamp_millis().max(0) as u64;
+        let canonical = t.ruleset_id.clone();
         queue.join(crate::queue::QueueEntry {
             ticket_id: t.id,
             stake_wei: t.stake_wei,
+            canonical_ruleset: canonical,
             ticket: amp_match_core::PlayerTicket {
                 player_id: t.wallet,
                 game_id: t.game_id,
@@ -220,7 +234,7 @@ async fn tick_once(st: &AppState) -> anyhow::Result<()> {
     let active = st.live_matches.load(Ordering::Relaxed);
     let pairs = st.queue.tick(active);
     for (a, b) in pairs {
-        let (game_id, ruleset_id) = (a.ticket.game_id.clone(), a.ticket.ruleset_id.clone());
+        let (game_id, ruleset_id) = (a.ticket.game_id.clone(), a.canonical_ruleset.clone());
         match st
             .matches
             .create_match(&game_id, &ruleset_id, &a, &b, false)
@@ -284,6 +298,7 @@ async fn tick_once(st: &AppState) -> anyhow::Result<()> {
                 let mut house_entry = crate::queue::QueueEntry {
                     ticket_id: uuid::Uuid::new_v4(),
                     stake_wei: 0,
+                    canonical_ruleset: entry.canonical_ruleset.clone(),
                     ticket: entry.ticket.clone(),
                 };
                 house_entry.ticket.player_id = house.clone();
@@ -330,8 +345,50 @@ async fn tick_once(st: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reconcile expired live matches.
+/// Reconcile expired live matches, lapsed escrow windows, and RT fallbacks.
 async fn sweep_once(st: &AppState) -> anyhow::Result<()> {
+    // Escrow windows that closed without both players funding: cancel the
+    // match row. Any one-sided on-chain funding is refundable by the player
+    // via registry cancelMatch/expireMatch — the server never touches it.
+    for m in st.store.expired_escrow_matches().await? {
+        st.store.set_match_state(m.id, "cancelled").await?;
+        for w in [&m.player_a, &m.player_b] {
+            st.hub.send(
+                w,
+                "match_update",
+                json!({ "matchId": m.id.to_string(), "state": "cancelled", "reason": "escrow window lapsed" }),
+            );
+        }
+    }
+
+    // Direct-RT windows that lapsed: fall back to the verifier-attested
+    // relayer settlement using the attestation stored at agreement time.
+    for m in st.store.rt_overdue_matches().await? {
+        if m.stake_wei == 0 || m.on_chain_match_id.is_none() {
+            st.store.set_match_state(m.id, "agreed").await?;
+            continue;
+        }
+        let Some(att) = m.attestation.as_ref() else {
+            st.store.set_match_state(m.id, "agreed").await?;
+            continue;
+        };
+        let payload = serde_json::json!({
+            "matchUuid": m.id.to_string(),
+            "onChainMatchId": att["matchId"],
+            "outcomeCode": att["outcomeCode"],
+            "transcriptHash": att["transcriptHash"],
+            "signature": att["signature"],
+        });
+        if st.store.insert_settle_job(payload).await.is_ok() {
+            st.store.set_match_state(m.id, "settling").await?;
+            tracing::info!(match_id = %m.id, "RT window lapsed — relayer fallback enqueued");
+        }
+    }
+
+    live_sweep(st).await
+}
+
+async fn live_sweep(st: &AppState) -> anyhow::Result<()> {
     for m in st.store.expired_live_matches().await? {
         let reports = st.store.get_reports(m.id).await?;
         match reports.len() {
@@ -352,6 +409,7 @@ async fn sweep_once(st: &AppState) -> anyhow::Result<()> {
                         &m,
                         outcome,
                         reports[0].transcript_hash.as_deref(),
+                        &reports,
                     )
                     .await
                     {

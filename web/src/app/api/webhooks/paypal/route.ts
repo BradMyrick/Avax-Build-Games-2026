@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { paypalAccessToken, paypalBase, paypalConfigured } from "@/lib/paypal";
-import { getStore } from "@/lib/store";
+import { getStore, validateBodySize } from "@/lib/store";
 
 export const runtime = "nodejs";
 
@@ -14,6 +14,7 @@ export const runtime = "nodejs";
  * Always returns 200 so PayPal doesn't retry (retries would double-process).
  */
 export async function POST(request: Request) {
+  if (validateBodySize(request)) return validateBodySize(request)!;
   // Always return 200 to stop retries, even on misconfiguration.
   if (!paypalConfigured()) return new NextResponse("ok", { status: 200 });
 

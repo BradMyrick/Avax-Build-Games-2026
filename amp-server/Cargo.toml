@@ -25,6 +25,9 @@ serde_json = "1"
 alloy-primitives = "1"
 alloy-signer = "2"
 alloy-signer-local = "2"
+alloy-provider = { version = "2", features = ["reqwest"] }
+alloy-contract = "2"
+alloy-sol-types = "1"
 sha2 = "0.10"
 amp-match-core = { path = "../amp-match-core" }
 uuid = { version = "1", features = ["v4", "serde"] }

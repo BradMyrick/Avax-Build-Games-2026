@@ -57,11 +57,11 @@ abigen!(
     ]"#,
 );
 
-const FUJI_CHAIN_ID: u64 = 43113;
-const FUJI_RPC: &str = "https://api.avax-test.network/ext/bc/C/rpc";
-const CUP_ADDRESS_HEX: &str = "0x7c743c1c9ae3e7a65d030098f2249b7787d66dff";
-// Deployed + timelock-governed on Fuji (contracts/deployment-fuji.json).
-const SETTLEMENT_ADDRESS_HEX: &str = "0xc1b12a7Ffad6CeFf045064f9fE3E8879F0F3c9eD";
+mod bracket;
+
+mod config;
+
+use config::Config;
 
 #[derive(Debug, Deserialize)]
 struct Job {
@@ -106,12 +106,21 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let cfg = Config::from_env()?;
+    info!(
+        chain_id = cfg.chain_id,
+        rpc = %cfg.rpc_url,
+        cup = %cfg.cup_address,
+        settlement = %cfg.settlement_address,
+        "AMP relayer configuration"
+    );
+
     let db_url = env::var("DATABASE_URL").context("DATABASE_URL not set")?;
     let key_str = env::var("AMP_RELAYER_KEY").context("AMP_RELAYER_KEY not set")?;
     let wallet: LocalWallet = key_str
         .parse::<LocalWallet>()
         .context("invalid AMP_RELAYER_KEY")?
-        .with_chain_id(FUJI_CHAIN_ID);
+        .with_chain_id(cfg.chain_id);
     let relayer_addr = wallet.address();
     info!(?relayer_addr, "AMP relayer started");
 
@@ -122,19 +131,20 @@ async fn main() -> Result<()> {
         .context("connecting to Postgres")?;
 
     let provider = Arc::new(SignerMiddleware::new(
-        Provider::<Http>::try_from(FUJI_RPC)?,
+        Provider::<Http>::try_from(cfg.rpc_url.as_str())?,
         wallet.clone(),
     ));
     let balance = provider.get_balance(relayer_addr, None).await?;
     info!(?balance, "relayer balance");
 
+    let cfg = Arc::new(cfg);
     loop {
-        match poll_once(&pool, &provider, &key_str).await {
+        match poll_once(&pool, &provider, &key_str, &cfg).await {
             Ok(true) => {}
-            Ok(false) => tokio::time::sleep(Duration::from_secs(3)).await,
+            Ok(false) => tokio::time::sleep(Duration::from_millis(cfg.poll_idle_ms)).await,
             Err(e) => {
                 error!(error = %e, "poll error; backing off");
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                tokio::time::sleep(Duration::from_millis(cfg.poll_error_ms)).await;
             }
         }
     }
@@ -142,7 +152,12 @@ async fn main() -> Result<()> {
 
 type SignerProvider = SignerMiddleware<Provider<Http>, LocalWallet>;
 
-async fn poll_once(pool: &PgPool, provider: &Arc<SignerProvider>, key_str: &str) -> Result<bool> {
+async fn poll_once(
+    pool: &PgPool,
+    provider: &Arc<SignerProvider>,
+    key_str: &str,
+    cfg: &Arc<Config>,
+) -> Result<bool> {
     let row = sqlx::query(
         r#"SELECT id, kind, payload::text as payload FROM relayer_jobs
            WHERE status = 'pending'
@@ -165,9 +180,9 @@ async fn poll_once(pool: &PgPool, provider: &Arc<SignerProvider>, key_str: &str)
     info!(job_id = job.id, kind = %job.kind, "processing job");
 
     let result = match job.kind.as_str() {
-        "fund" => fund_job(provider, &job, key_str, pool).await,
-        "finalize" => finalize_job(provider, &job, key_str, pool).await,
-        "settle_match" => settle_match_job(provider, &job, pool).await,
+        "fund" => fund_job(provider, &job, key_str, pool, cfg).await,
+        "finalize" => finalize_job(provider, &job, key_str, pool, cfg).await,
+        "settle_match" => settle_match_job(provider, &job, pool, cfg).await,
         other => Err(anyhow!("unknown job kind: {other}")),
     };
 
@@ -208,10 +223,11 @@ async fn fund_job(
     job: &Job,
     key_str: &str,
     pool: &PgPool,
+    cfg: &Arc<Config>,
 ) -> Result<(Option<i64>, Option<String>)> {
     let p: FundPayload = serde_json::from_value(job.payload.clone())?;
 
-    let cup: Address = CUP_ADDRESS_HEX.parse()?;
+    let cup: Address = cfg.cup_address.parse()?;
     let contract = AMPTournamentCup::new(cup, Arc::clone(provider));
 
     let deadline = U256::from(
@@ -238,7 +254,13 @@ async fn fund_job(
     // Instant mode: finalize immediately with sponsor-provided winners.
     if p.mode.as_deref() == Some("instant") && !p.winner_wallets.is_empty() {
         let winners = parse_addresses(&p.winner_wallets)?;
-        let sig = finalize_signature(key_str, tournament_id.as_u64(), &winners)?;
+        let sig = finalize_signature(
+            key_str,
+            cfg.chain_id,
+            &cfg.cup_address,
+            tournament_id.as_u64(),
+            &winners,
+        )?;
         let fin_call = contract
             .finalize_tournament(tournament_id, winners, sig.into())
             .gas(400_000);
@@ -303,9 +325,12 @@ async fn finalize_job(
     job: &Job,
     key_str: &str,
     pool: &PgPool,
+    cfg: &Arc<Config>,
 ) -> Result<(Option<i64>, Option<String>)> {
-    // P0-1: the job carries ONLY { tournamentId }. Winners are loaded from the
-    // bracket's computedWinners (written by the authenticated finalize route).
+    // P0-1: the job carries ONLY { tournamentId }. The relayer re-derives the
+    // winner order from the durable bracket rows and cross-checks against the
+    // web's computedWinners — a payout address never rides the job payload,
+    // and the web's derivation is never trusted blindly.
     #[derive(Deserialize)]
     struct FinPayload {
         #[serde(rename = "tournamentId")]
@@ -313,6 +338,27 @@ async fn finalize_job(
     }
     let p: FinPayload = serde_json::from_value(job.payload.clone())?;
     let tid = p.tournament_id;
+
+    // Guards: tournament exists, is OPEN, and payout structure is known.
+    let trow = sqlx::query(
+        "SELECT state, payout_bps::text AS payout FROM tournaments WHERE tournament_id = $1",
+    )
+    .bind(tid)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow!("tournament {tid} not found"))?;
+    let t_state: String = trow.get("state");
+    let payout_json: String = trow.get("payout");
+    if t_state != "OPEN" {
+        return Err(anyhow!(
+            "tournament {tid} is {t_state}, not OPEN (already finalized?)"
+        ));
+    }
+    let payout_bps: Vec<u16> = serde_json::from_str(&payout_json)
+        .with_context(|| format!("bad payout_bps for tournament {tid}"))?;
+    if payout_bps.is_empty() {
+        return Err(anyhow!("tournament {tid} has no placements"));
+    }
 
     let row = sqlx::query("SELECT state::text FROM brackets WHERE tournament_id = $1")
         .bind(tid)
@@ -322,21 +368,50 @@ async fn finalize_job(
     let state_text: String = row.get("state");
     let state: Value = serde_json::from_str(&state_text)?;
 
-    let winners: Vec<String> = state["computedWinners"]
-        .as_array()
-        .ok_or_else(|| anyhow!("no computedWinners on bracket"))?
-        .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
-    if winners.is_empty() {
-        return Err(anyhow!("bracket has no computed winners"));
+    // Only single-elim is ported to the relayer; other formats must not
+    // finalize through this path until their derivation is ported too.
+    let format = state["format"].as_str().unwrap_or("single_elimination");
+    if format != "single_elimination" {
+        return Err(anyhow!(
+            "format {format} winner derivation not ported to relayer; refusing"
+        ));
+    }
+
+    let players: Vec<bracket::PlayerRow> = serde_json::from_value(state["players"].clone())
+        .with_context(|| format!("bad players on bracket for {tid}"))?;
+    let results: Vec<bracket::ResultRow> = serde_json::from_value(state["results"].clone())
+        .with_context(|| format!("bad results on bracket for {tid}"))?;
+
+    let mut winners = bracket::derive_single_elim_winners(&players, &results)
+        .with_context(|| format!("winner derivation failed for tournament {tid}"))?;
+    if winners.len() < payout_bps.len() {
+        return Err(anyhow!(
+            "derived {} winners but tournament pays {} placements",
+            winners.len(),
+            payout_bps.len()
+        ));
+    }
+    winners.truncate(payout_bps.len());
+
+    // Parity cross-check against the web's derivation (defense against a
+    // port bug on either side): mismatch → refuse to sign.
+    if let Some(web_winners) = state["computedWinners"].as_array() {
+        let web: Vec<String> = web_winners
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        if !web.is_empty() && web != winners {
+            return Err(anyhow!(
+                "derived winners disagree with web computedWinners for {tid}: refusing to sign"
+            ));
+        }
     }
 
     let addrs = parse_addresses(&winners)?;
     let tid_u256 = U256::from(tid);
-    let cup: Address = CUP_ADDRESS_HEX.parse()?;
+    let cup: Address = cfg.cup_address.parse()?;
     let contract = AMPTournamentCup::new(cup, Arc::clone(provider));
-    let sig = finalize_signature(key_str, tid as u64, &addrs)?;
+    let sig = finalize_signature(key_str, cfg.chain_id, &cfg.cup_address, tid as u64, &addrs)?;
     let fin_call = contract
         .finalize_tournament(tid_u256, addrs, sig.into())
         .gas(400_000);
@@ -351,6 +426,7 @@ async fn settle_match_job(
     provider: &Arc<SignerProvider>,
     job: &Job,
     pool: &PgPool,
+    cfg: &Arc<Config>,
 ) -> Result<(Option<i64>, Option<String>)> {
     #[derive(Deserialize)]
     struct SettlePayload {
@@ -390,9 +466,7 @@ async fn settle_match_job(
         ));
     }
 
-    let settlement: Address = env::var("AMP_SETTLEMENT_ADDRESS")
-        .unwrap_or_else(|_| SETTLEMENT_ADDRESS_HEX.to_string())
-        .parse()?;
+    let settlement: Address = cfg.settlement_address.parse()?;
     let contract = AMPSettlement::new(settlement, Arc::clone(provider));
 
     let result = AsyncResult {
@@ -425,8 +499,14 @@ async fn settle_match_job(
 /// Hand-rolled EIP-712 TournamentResult signature, byte-identical to the contract
 /// and the browser (ethers signTypedData). Kept explicit so the digest encoding
 /// is unambiguous and version-independent.
-fn finalize_signature(key_str: &str, tournament_id: u64, winners: &[Address]) -> Result<Vec<u8>> {
-    let digest = eip712_finalize_digest(tournament_id, winners);
+fn finalize_signature(
+    key_str: &str,
+    chain_id: u64,
+    cup_address_hex: &str,
+    tournament_id: u64,
+    winners: &[Address],
+) -> Result<Vec<u8>> {
+    let digest = eip712_finalize_digest(chain_id, cup_address_hex, tournament_id, winners);
     let secret_hex = key_str.trim_start_matches("0x");
     let secret = hex::decode(secret_hex).context("bad key hex")?;
     let arr: [u8; 32] = secret
@@ -448,8 +528,13 @@ fn finalize_signature(key_str: &str, tournament_id: u64, winners: &[Address]) ->
 }
 
 /// EIP-712 digest for TournamentResult(uint256 tournamentId, address[] winners).
-fn eip712_finalize_digest(tournament_id: u64, winners: &[Address]) -> [u8; 32] {
-    let cup: Address = CUP_ADDRESS_HEX.parse().unwrap();
+fn eip712_finalize_digest(
+    chain_id: u64,
+    cup_address_hex: &str,
+    tournament_id: u64,
+    winners: &[Address],
+) -> [u8; 32] {
+    let cup: Address = cup_address_hex.parse().unwrap();
 
     // Domain separator
     let mut bs = Vec::new();
@@ -458,7 +543,7 @@ fn eip712_finalize_digest(tournament_id: u64, winners: &[Address]) -> [u8; 32] {
     ));
     bs.extend_from_slice(&keccak256(b"AMPTournamentCup"));
     bs.extend_from_slice(&keccak256(b"1"));
-    bs.extend_from_slice(&u256_bytes(U256::from(FUJI_CHAIN_ID)));
+    bs.extend_from_slice(&u256_bytes(U256::from(chain_id)));
     bs.extend_from_slice(&addr_bytes(&cup));
     let domain_sep = keccak256(&bs);
 

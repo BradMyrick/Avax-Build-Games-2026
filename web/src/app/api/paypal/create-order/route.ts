@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { paypalAccessToken, paypalBase, paypalConfigured } from "@/lib/paypal";
+import { validateBodySize } from "@/lib/store";
 
 export const runtime = "nodejs";
 
@@ -9,6 +10,7 @@ export const runtime = "nodejs";
  * The amount is fixed server-side so the client can never underpay.
  */
 export async function POST(request: Request) {
+  if (validateBodySize(request)) return validateBodySize(request)!;
   if (!paypalConfigured()) {
     return NextResponse.json(
       { error: "PayPal not configured. Set PAYPAL_CLIENT_ID / PAYPAL_SECRET." },

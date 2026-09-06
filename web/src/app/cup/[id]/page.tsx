@@ -248,7 +248,7 @@ export default function CupPage() {
 
         <p className="text-center text-[11px] text-zinc-600 mt-8">
           Powered by the AMP Verifiable Tournament Engine ·{" "}
-          <a href="https://testnet.snowtrace.io/address/0x7c743c1c9ae3e7a65d030098f2249b7787d66dff" target="_blank" rel="noreferrer" className="hover:text-brand-cyan">
+          <a href={`${EXPLORER_URL}/address/${CUP_ADDRESS}`} target="_blank" rel="noreferrer" className="hover:text-brand-cyan">
             view contract
           </a>
         </p>

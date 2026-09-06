@@ -26,10 +26,14 @@ pub fn now_ms() -> u64 {
 }
 
 /// In-memory queue entry; wraps the pure `PlayerTicket` with server context.
+/// `ticket.ruleset_id` carries the stake-qualified bucket form
+/// (`ruleset@stake:<wei>`) so match-core's internal buckets separate stakes;
+/// `canonical_ruleset` preserves the catalog id for match rows.
 #[derive(Debug, Clone)]
 pub struct QueueEntry {
     pub ticket_id: Uuid,
     pub stake_wei: i64,
+    pub canonical_ruleset: String,
     pub ticket: PlayerTicket,
 }
 
@@ -71,12 +75,21 @@ impl QueueService {
         }
     }
 
-    fn bucket_of(t: &PlayerTicket) -> BucketKey {
-        (t.game_id.clone(), t.ruleset_id.clone())
+    /// Bucket key — matches match-core's internal (game, ruleset) keying
+    /// because `join` stamps the stake-qualified ruleset into the ticket.
+    fn bucket_of(e: &QueueEntry) -> BucketKey {
+        (e.ticket.game_id.clone(), e.ticket.ruleset_id.clone())
     }
 
-    pub fn join(&self, entry: QueueEntry) {
+    pub fn join(&self, mut entry: QueueEntry) {
         let mut inner = self.inner.lock().unwrap();
+        // Stamp the stake tier into the ticket's ruleset so match-core buckets
+        // on the qualified id — free players never share a bucket with staked
+        // players, and stakes pair only at identical amounts.
+        if entry.stake_wei > 0 {
+            entry.ticket.ruleset_id =
+                format!("{}@stake:{}", entry.canonical_ruleset, entry.stake_wei);
+        }
         // MatchQueue::push replaces any prior entry for this player; mirror
         // that in the side index so waits never leak.
         if let Some((old_bucket, old_time)) = inner.members.remove(&entry.ticket.player_id)
@@ -86,7 +99,7 @@ impl QueueService {
         {
             inner.waits.remove(&old_bucket);
         }
-        let bucket = Self::bucket_of(&entry.ticket);
+        let bucket = Self::bucket_of(&entry);
         let player = entry.ticket.player_id.clone();
         let t = entry.ticket.enqueued_at_ms;
         inner.queue.push(entry);
@@ -203,7 +216,7 @@ impl QueueService {
         let mut stale = Vec::new();
         let mut keep = Vec::with_capacity(all.len());
         for e in all {
-            if stale_buckets.contains(&Self::bucket_of(&e.ticket))
+            if stale_buckets.contains(&Self::bucket_of(&e))
                 && e.ticket.enqueued_at_ms <= stale_before
             {
                 if let Some((b, t)) = inner.members.remove(&e.ticket.player_id)
@@ -250,6 +263,12 @@ mod tests {
             bot_after_ms: 45_000,
             house_wallet: None,
             queue_windows: Vec::new(),
+            rpc_url: "http://localhost:8545".into(),
+            registry_address: None,
+            registry_game_id: 0,
+            escrow_window_minutes: 10,
+            rt_grace_minutes: 30,
+            site_name: "AMP Arena".into(),
         })
     }
 
@@ -257,6 +276,7 @@ mod tests {
         QueueEntry {
             ticket_id: Uuid::new_v4(),
             stake_wei: 0,
+            canonical_ruleset: "ranked-1v1".into(),
             ticket: PlayerTicket {
                 player_id: wallet.into(),
                 game_id: game.into(),
@@ -362,5 +382,30 @@ mod tests {
         svc.join(entry("0xa", 1500.0, "g"));
         assert!(svc.take_stale(45_000).is_empty());
         assert_eq!(svc.depth(), 1);
+    }
+
+    #[test]
+    fn staked_never_pairs_with_free_or_different_stake() {
+        let svc = QueueService::new(cfg());
+        let mut free = entry("0xa", 1500.0, "g");
+        free.stake_wei = 0;
+        let mut staked_1 = entry("0xb", 1500.0, "g");
+        staked_1.stake_wei = 1_000_000_000_000; // 0.0001 AVAX-ish tier
+        let mut staked_2 = entry("0xc", 1500.0, "g");
+        staked_2.stake_wei = 2_000_000_000_000;
+        svc.join(free);
+        svc.join(staked_1);
+        svc.join(staked_2);
+        assert!(
+            svc.tick(0).is_empty(),
+            "free/staked and mismatched stakes must never pair"
+        );
+        // Same stake pairs fine.
+        let mut staked_1b = entry("0xd", 1510.0, "g");
+        staked_1b.stake_wei = 1_000_000_000_000;
+        svc.join(staked_1b);
+        let pairs = svc.tick(0);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0.stake_wei, pairs[0].1.stake_wei);
     }
 }

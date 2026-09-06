@@ -149,6 +149,43 @@ cd contracts && forge test -vvv
 - Contracts: `ReentrancyGuard` + `Pausable` + `Ownable2Step`, value
   conservation fuzz-tested, timelock governance on economic parameters.
 
+### P0 audit remediation — verified closed
+
+The 2026-07 audit spec (`SECURITY_REMEDIATION.md`, preserved in git
+history) is fully remediated and was removed from the tree:
+
+| Item | Resolution |
+|---|---|
+| C1 payout tampering | Relayer jobs carry `{tournamentId}` only; winners independently re-derived in Rust (`relayer/src/bracket.rs`) with a 36-case TS-engine parity corpus, cross-checked against the web's derivation before signing |
+| C2 double funding | PayPal orders gated by `funding_intents` idempotency; amounts verified server-side |
+| C3 organizer spoofing | Bearer `manage_token` (constant-time compare) on bracket/finalize/init; token required on init upsert |
+| H1 report forgery/replay | EIP-191 signature recovery + `report_nonces` single-use on `/report` |
+| Abuse limits | Upstash sliding-window rate limits (5/30/60 per min) + 64KB body caps + array-length caps on every write route |
+| L2/L3 job leakage | `GET /api/job/[id]` returns status fields only; row provisioning moved into the relayer |
+
+## Ops notes
+
+### Wallet phishing warnings on preview deployments
+
+MetaMask (and PhishFort, its warning-list supplier) has flagged thousands of
+abused `*.vercel.app` / `*.netlify.app` preview subdomains. Wallet prompts on
+a PR preview URL can therefore show *"Continue at your own risk…"* even
+though the site is clean — the warning targets the domain's reputation, not
+the code. `playwithamp.xyz` itself is not on any list.
+
+Rules of thumb:
+- **Never share wallet-facing flows on preview URLs.** Test sign-in flows on
+  the production custom domain only.
+- If a specific subdomain got flagged (recycled preview names carry
+  scammers' history), request delisting:
+  - MetaMask: <https://support.metamask.io> (report a false positive) or
+    file an issue on `MetaMask/eth-phishing-detect`.
+  - PhishFort: open a PR against `phishfort/phishfort-lists/whitelists`.
+- Keep signature prompts human-readable and truthful — the sign-in message
+  states plainly that it is free and moves no funds
+  (`auth.rs::challenge_message`, site name via `AMP_SITE_NAME`). Opaque
+  `PREFIX:uuid` blobs are what drainer reports are made of.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).

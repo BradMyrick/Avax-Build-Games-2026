@@ -4,10 +4,23 @@ import { ethers } from "ethers";
  * AMPTournamentCup — live on Fuji.
  * Sponsor-funded prize-pool escrow: sponsor funds → verifier attests winners →
  * winners pull-claim. This module drives the on-chain side from the browser.
+ *
+ * Repo standard: network values come from NEXT_PUBLIC_* env vars with
+ * documented Fuji defaults (see web/.env.example) — no address or chain id
+ * without an env path.
  */
-export const CUP_ADDRESS = "0x7c743c1c9ae3e7a65d030098f2249b7787d66dff";
-export const FUJI_CHAIN_ID = 43113;
-export const FUJI_RPC = "https://api.avax-test.network/ext/bc/C/rpc";
+export const CUP_ADDRESS =
+  process.env.NEXT_PUBLIC_AMP_CUP_ADDRESS ||
+  "0x7c743c1c9ae3e7a65d030098f2249b7787d66dff";
+export const FUJI_CHAIN_ID = Number(
+  process.env.NEXT_PUBLIC_AMP_CHAIN_ID || "43113",
+);
+export const FUJI_RPC =
+  process.env.NEXT_PUBLIC_AMP_RPC_URL ||
+  "https://api.avax-test.network/ext/bc/C/rpc";
+/** Block explorer base (no trailing slash) for user-facing links. */
+export const EXPLORER_URL =
+  process.env.NEXT_PUBLIC_AMP_EXPLORER_URL || "https://testnet.snowtrace.io";
 
 export const AMPCUP_ABI = [
   "function createTournament(uint16[] payoutBps, address verifier, uint64 finalizeDeadline) payable returns (uint256)",

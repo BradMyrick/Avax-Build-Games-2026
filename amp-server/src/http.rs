@@ -95,6 +95,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/matches/{id}", get(get_match))
         .route("/v1/matches/history", get(history))
         .route("/v1/admin/matches/{id}/arbitrate", post(admin_arbitrate))
+        .route("/v1/matches/{id}/escrow/verify", post(escrow_verify))
+        .route("/v1/players/{wallet}", get(player_profile))
         .route("/v1/ws", get(ws_upgrade))
         .with_state(state)
 }
@@ -171,7 +173,13 @@ async fn list_games(State(st): State<AppState>) -> ApiResult<Json<Value>> {
             "nextQueueWindowUtc": next_queue_window(&st.cfg, &g.id),
         }));
     }
-    Ok(Json(json!({ "games": out })))
+    Ok(Json(json!({
+        "games": out,
+        "stakingEnabled": st.cfg.staking_enabled,
+        "chainId": st.cfg.chain_id,
+        "registryAddress": st.cfg.registry_address,
+        "registryGameId": st.cfg.registry_game_id,
+    })))
 }
 
 /// Next scheduled prime-time window (RFC3339) for a game, if configured.
@@ -267,6 +275,12 @@ struct JoinReq {
     region: Option<String>,
     #[serde(rename = "stakeWei", default)]
     stake_wei: i64,
+    /// Unix seconds — the signed intent's expiry.
+    #[serde(rename = "intentDeadline")]
+    intent_deadline: Option<i64>,
+    /// EIP-712 signature over MatchIntent (65-byte hex). Required for staked joins.
+    #[serde(rename = "intentSig")]
+    intent_sig: Option<String>,
 }
 
 async fn queue_join(
@@ -297,6 +311,53 @@ async fn queue_join(
 
     if req.stake_wei > 0 && !st.cfg.staking_enabled {
         return Err(ApiError::StakingDisabled);
+    }
+
+    // Staked joins require a signed EIP-712 MatchIntent — the gasless stake
+    // commitment. Verify recovery against the joining wallet and enforce the
+    // deadline window (no replays of stale intents).
+    let mut intent_deadline: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut intent_sig: Option<String> = None;
+    if req.stake_wei > 0 {
+        let settlement = st.settlement.ok_or_else(|| {
+            ApiError::BadRequest("staking requires AMP_SETTLEMENT_ADDRESS".into())
+        })?;
+        let deadline = req
+            .intent_deadline
+            .ok_or_else(|| ApiError::BadRequest("staked joins require intentDeadline".into()))?;
+        let sig = req
+            .intent_sig
+            .clone()
+            .ok_or_else(|| ApiError::BadRequest("staked joins require intentSig".into()))?;
+        let player: alloy_primitives::Address = wallet
+            .parse()
+            .map_err(|_| ApiError::BadRequest("bad wallet".into()))?;
+        let now = chrono::Utc::now().timestamp();
+        if deadline <= now {
+            return Err(ApiError::BadRequest("intent expired".into()));
+        }
+        if deadline > now + 86_400 {
+            return Err(ApiError::BadRequest(
+                "intent deadline too far in the future".into(),
+            ));
+        }
+        let intent = crate::intent::MatchIntent {
+            player,
+            game_id: &game_id,
+            ruleset_id: &ruleset_id,
+            stake_wei: req.stake_wei as u64,
+            deadline: deadline as u64,
+        };
+        let recovered =
+            crate::intent::recover_intent_signer(st.cfg.chain_id, settlement, &intent, &sig)
+                .map_err(|e| ApiError::BadRequest(format!("bad intent signature: {e}")))?;
+        if format!("{recovered:#x}").to_lowercase() != wallet {
+            return Err(ApiError::BadRequest(
+                "intent signature does not match wallet".into(),
+            ));
+        }
+        intent_deadline = Some(chrono::DateTime::from_timestamp(deadline, 0).unwrap_or_default());
+        intent_sig = Some(sig);
     }
 
     // One live match at a time — finish (or report) before re-queuing.
@@ -353,13 +414,17 @@ async fn queue_join(
             status: "queued".into(),
             match_id: None,
             joined_at,
+            intent_deadline,
+            intent_sig,
         })
         .await
         .map_err(ApiError::Database)?;
 
+    let canonical_ruleset = ruleset_id.clone();
     st.queue.join(QueueEntry {
         ticket_id,
         stake_wei: req.stake_wei,
+        canonical_ruleset,
         ticket: amp_match_core::PlayerTicket {
             player_id: wallet.clone(),
             game_id,
@@ -531,7 +596,8 @@ async fn report_outcome(
 
     match crate::matchsvc::reconcile(&m.player_a, &m.player_b, &reports) {
         Some(outcome) => {
-            let applied = finalize_match(&st, &m, outcome, req.transcript_hash.as_deref()).await?;
+            let applied =
+                finalize_match(&st, &m, outcome, req.transcript_hash.as_deref(), &reports).await?;
             notify_result(&st, &m, &applied);
             Ok(Json(
                 json!({ "matchId": id.to_string(), "state": "agreed", "outcome": applied.outcome }),
@@ -564,6 +630,7 @@ pub async fn finalize_match(
     m: &crate::store::MatchRow,
     outcome: Outcome,
     transcript_hash: Option<&str>,
+    reports: &[crate::store::ReportRow],
 ) -> ApiResult<crate::matchsvc::AppliedOutcome> {
     let applied = st
         .matches
@@ -574,6 +641,7 @@ pub async fn finalize_match(
             st.verifier.as_deref(),
             st.cfg.chain_id,
             st.settlement,
+            reports,
         )
         .await?;
     st.live_matches.fetch_sub(1, Ordering::Relaxed);
@@ -641,6 +709,8 @@ pub fn match_view(m: &crate::store::MatchRow, viewer: &str) -> Value {
         "outcome": m.outcome,
         "winner": m.winner,
         "attestation": m.attestation,
+        "onChainMatchId": m.on_chain_match_id,
+        "settleDeadline": m.settle_deadline.as_ref().map(|d| d.to_rfc3339()),
         "expiresAt": m.expires_at.to_rfc3339(),
     })
 }
@@ -710,7 +780,7 @@ async fn admin_arbitrate(
                 "win_b" => Outcome::WinB,
                 _ => Outcome::Draw,
             };
-            let applied = finalize_match(&st, &m, outcome, None).await?;
+            let applied = finalize_match(&st, &m, outcome, None, &[]).await?;
             notify_result(&st, &m, &applied);
             Ok(Json(
                 json!({ "matchId": id.to_string(), "state": "agreed", "outcome": applied.outcome }),
@@ -751,6 +821,130 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+// ---- escrow ------------------------------------------------------------------------
+
+/// Confirm on-chain escrow for a staked match: both players funded the
+/// registry, the match is READY, and the wallets match. Only then does the
+/// server flip the match to live. Players run createMatch/joinMatch from
+/// their own wallets — the server verifies, never custodies.
+async fn escrow_verify(
+    State(st): State<AppState>,
+    Authed(wallet): Authed,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let m = st
+        .store
+        .get_match(id)
+        .await
+        .map_err(ApiError::Database)?
+        .ok_or_else(|| ApiError::NotFound("match not found".into()))?;
+    if m.player_a != wallet && m.player_b != wallet {
+        return Err(ApiError::Forbidden("not a participant".into()));
+    }
+    if m.state != "escrow_pending" {
+        return Err(ApiError::Conflict(format!(
+            "match is {}, not escrow_pending",
+            m.state
+        )));
+    }
+    let registry: alloy_primitives::Address = st
+        .cfg
+        .registry_address
+        .as_deref()
+        .and_then(|a| a.parse().ok())
+        .ok_or_else(|| {
+            ApiError::BadRequest("escrow not configured (AMP_REGISTRY_ADDRESS)".into())
+        })?;
+    let on_chain_id = m
+        .on_chain_match_id
+        .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("staked match without on-chain id")))?
+        as u64;
+
+    let oc = crate::escrow::read_match(&st.cfg.rpc_url, registry, on_chain_id)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("chain read failed: {e}")))?;
+    let oc =
+        oc.ok_or_else(|| ApiError::BadRequest("no on-chain match at the expected id".into()))?;
+    if oc.state != crate::escrow::STATE_READY {
+        return Ok(Json(json!({
+            "matchId": id.to_string(),
+            "escrowState": "waiting",
+            "onChainState": oc.state,
+            "note": "opponent has not funded yet",
+        })));
+    }
+    if format!("{:#x}", oc.player_a).to_lowercase() != m.player_a
+        || format!("{:#x}", oc.player_b).to_lowercase() != m.player_b
+    {
+        return Err(ApiError::BadRequest(
+            "on-chain escrow players do not match this match".into(),
+        ));
+    }
+
+    let confirmed = st
+        .store
+        .confirm_escrow(id, st.cfg.match_ttl_minutes)
+        .await
+        .map_err(ApiError::Database)?;
+    if confirmed {
+        st.live_matches.fetch_add(1, Ordering::Relaxed);
+        for w in [&m.player_a, &m.player_b] {
+            st.hub.send(
+                w,
+                "match_update",
+                json!({ "matchId": id.to_string(), "state": "live", "escrow": "confirmed" }),
+            );
+        }
+    }
+    Ok(Json(json!({
+        "matchId": id.to_string(),
+        "escrowState": if confirmed { "confirmed" } else { "already" },
+        "stakeWei": m.stake_wei,
+    })))
+}
+
+// ---- public profile ------------------------------------------------------------------
+
+/// Sovereign, wallet-keyed cross-game MMR: public ratings + recent matches
+/// for any wallet. No auth — this is the portable skill record.
+async fn player_profile(
+    State(st): State<AppState>,
+    Path(wallet): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let wallet = crate::auth::normalize_wallet(&wallet)?;
+    let ratings = sqlx::query(
+        "SELECT game_id, ruleset_id, rating, rating_deviation, wins, losses, draws, updated_at \
+         FROM amp_ratings WHERE wallet = $1 ORDER BY updated_at DESC",
+    )
+    .bind(&wallet)
+    .fetch_all(st.store.pool())
+    .await
+    .map_err(ApiError::Database)?;
+    let ratings: Vec<Value> = ratings
+        .iter()
+        .map(|r| {
+            json!({
+                "gameId": r.get::<String, _>("game_id"),
+                "rulesetId": r.get::<String, _>("ruleset_id"),
+                "rating": r.get::<f64, _>("rating"),
+                "deviation": r.get::<f64, _>("rating_deviation"),
+                "wins": r.get::<i64, _>("wins"),
+                "losses": r.get::<i64, _>("losses"),
+                "draws": r.get::<i64, _>("draws"),
+            })
+        })
+        .collect();
+    let rows = st
+        .store
+        .history(&wallet, 20, 0)
+        .await
+        .map_err(ApiError::Database)?;
+    let matches: Vec<Value> = rows.iter().map(|m| match_view(m, &wallet)).collect();
+    Ok(Json(
+        json!({ "wallet": wallet, "ratings": ratings, "matches": matches }),
+    ))
 }
 
 // ---- websocket ---------------------------------------------------------------------
