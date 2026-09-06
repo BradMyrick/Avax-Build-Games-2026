@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Users,
@@ -20,8 +20,6 @@ import {
   Scale,
 } from "lucide-react";
 import {
-  AMP_SERVER_URL,
-  clearSession,
   computeCommitHash,
   connectWs,
   createParty,

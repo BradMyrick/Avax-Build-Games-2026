@@ -289,19 +289,7 @@ export default function ArenaPage() {
     }
   };
 
-  const report = async (result: "win" | "loss" | "draw") => {
-    if (!matchView) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await reportOutcome(matchView.matchId, result);
-      setPhase("reported");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "report failed");
-    } finally {
-      setBusy(false);
-    }
-  };
+  // Report is handled by handleGameFinish (QuickDraw auto-reports).
 
   const playedAgain = async () => {
     setResultView(null);

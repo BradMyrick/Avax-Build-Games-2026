@@ -21,13 +21,15 @@ export default function FujiNetwork() {
     const [transactions, setTransactions] = useState<TxDisplay[]>(FALLBACK_TXS);
 
     // Hydrate stored simulations after mount — never during SSR render.
+    // Defers setState via queueMicrotask to satisfy the React 19
+    // set-state-in-effect lint (prevents cascading renders).
     useEffect(() => {
         const stored = localStorage.getItem('amp-simulations');
         if (stored) {
             try {
                 const parsed = JSON.parse(stored);
                 if (Array.isArray(parsed) && parsed.length > 0) {
-                    setTransactions(parsed.slice(0, 5));
+                    queueMicrotask(() => setTransactions(parsed.slice(0, 5)));
                 }
             } catch {
                 // corrupted localStorage — keep fallback

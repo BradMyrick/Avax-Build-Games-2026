@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Check, Copy, Rocket, ArrowRight, Terminal, Key, Swords, Trophy, Zap } from "lucide-react";
+import { Copy, Rocket, Key, Swords, Trophy, Zap } from "lucide-react";
 
 export const metadata = {
   title: "AMP Quickstart — Connect Your Game in 5 Minutes",

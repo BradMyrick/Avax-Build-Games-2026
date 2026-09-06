@@ -36,7 +36,7 @@ export interface QuickDrawProps {
   onFinish: (result: { won: boolean; roundsWon: number; avgReactionMs: number }) => void;
 }
 
-export default function QuickDraw({ opponentName, opponentRating, isBot, onFinish }: QuickDrawProps) {
+export default function QuickDraw({ opponentName, isBot, onFinish }: QuickDrawProps) {
   const [round, setRound] = useState(0);
   const [roundState, setRoundState] = useState<RoundState>("waiting");
   const [rounds, setRounds] = useState<RoundResult[]>([]);
