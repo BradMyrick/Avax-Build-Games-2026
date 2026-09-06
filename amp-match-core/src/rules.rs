@@ -498,6 +498,7 @@ mod tests {
             language: "en".into(),
             max_ping_ms: 150,
             enqueued_at_ms: 0,
+            party_size: 1,
         }
     }
 
@@ -562,6 +563,7 @@ mod tests {
             max_ping_ms: 50,
             // Old enqueue time → backfill window has elapsed.
             enqueued_at_ms: now_ms().saturating_sub(60_000),
+            party_size: 1,
         };
         let b = PlayerTicket {
             player_id: "b".into(),
@@ -574,6 +576,7 @@ mod tests {
             language: "en".into(),
             max_ping_ms: 50,
             enqueued_at_ms: now_ms().saturating_sub(60_000),
+            party_size: 1,
         };
 
         // Region rule: na vs eu, allowed_regions = ["na"] only — b's region
@@ -625,6 +628,7 @@ mod tests {
             language: "en".into(),
             max_ping_ms: 200,
             enqueued_at_ms: now_ms().saturating_sub(60_000),
+            party_size: 1,
         };
         let b = PlayerTicket {
             player_id: "b".into(),
@@ -639,6 +643,7 @@ mod tests {
             language: "en".into(),
             max_ping_ms: 200,
             enqueued_at_ms: now_ms().saturating_sub(60_000),
+            party_size: 1,
         };
 
         let rs = RuleSet {

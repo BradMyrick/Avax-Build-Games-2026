@@ -436,6 +436,7 @@ async fn queue_join(
             language: "en".into(),
             max_ping_ms: 150,
             enqueued_at_ms: joined_ms,
+            party_size: 1,
         },
     });
 

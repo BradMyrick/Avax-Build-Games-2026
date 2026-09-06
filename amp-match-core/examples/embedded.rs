@@ -93,5 +93,6 @@ fn enqueue_ticket(queue: &mut MatchQueue<PlayerTicket>, name: &str, mmr: f32) {
         language: "en".into(),
         max_ping_ms: 150,
         enqueued_at_ms: 0,
+        party_size: 1,
     });
 }

@@ -4,23 +4,34 @@
 
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../LICENSE)
 
-`amp-match-core` is the pure-logic heart of the [Avalanche Matchmaking Protocol](..): the rating math, the rule engine, and the queue. It contains **zero** RPC, persistence, async, or crypto machinery. If you want to embed AMP-quality matchmaking inside your own game server, peer-to-peer game, tournament platform, or analytics tool — without running the full AMP service — this is the crate.
+`amp-match-core` is the pure-logic heart of the [Avalanche Matchmaking Protocol](..): the rating math, the N-player party engine, the rule engine, and the queue. It contains **zero** RPC, persistence, or async machinery (plus exactly one audited crypto primitive — keccak256 — for v2 ticket commitments). If you want to embed AMP-quality matchmaking inside your own game server, peer-to-peer game, tournament platform, or analytics tool — without running the full AMP service — this is the crate.
 
 ## What's inside
 
 | Module           | What it gives you                                                  |
 |------------------|--------------------------------------------------------------------|
-| `glicko2`        | A hardened Glicko-2 rating update with NaN/Inf/non-positive-volatility guards and a bounded Illinois-method solver. |
-| `rules`          | Composable hard/soft constraint evaluation over skill, region, language, latency, and more. |
-| `queue`          | A bucketed matchmaking queue that pairs entries within the same `(game, ruleset)` bucket via a sorted-MMR scan with skill-window gating. Generic over any `T: AsRef<PlayerTicket>`. |
-| `types`          | The canonical data model: `PlayerTicket`, `RuleSet`, `Rule`, `MatchQualityDetail`, all `*Params`. |
+| `glicko2`        | Hardened Glicko-2 updates: the pairwise `glicko2_update`, and `glicko2_update_vs_many` — the Glickman-2013 rating-period form for N-player/team fields. **Bit-identical under any permutation of opponents** (fuzz-gated). |
+| `party`          | N-player parties: validation (1–16, no duplicates), four skill aggregations (`Highest` / `Average` / `Weighted` / `AdjustedAverage` with tunable anti-boost lambda), aggregate tickets that flow through the queue unchanged, deterministic region resolution (strict majority → lowest-latency hub, 120ms spread gate), and gamma anti-boost rating recalibration. |
+| `queue`          | Bucketed matchmaking: 1v1 pairing, `try_match_teams` (exact-size team packing with rating-window gates), `try_match_bucket_ffa` (all-or-nothing FFA lobbies), `drain_battle_royale` (wait-priority 16–64 player drainage with time-decayed windows). Generic over any `T: AsRef<PlayerTicket>`. |
+| `ladder`         | Final placement arrays → per-player opponent/score vectors for `glicko2_update_vs_many`, with tie-aware ranks. |
+| `commit`         | Anti-collusion: keccak256 ticket commitments (`H = keccak256(addr ‖ stake ‖ salt)`) and the blockhash-seeded, bias-free Fisher-Yates lobby shuffle. |
+| `rules`          | Composable hard/soft constraint evaluation over skill, region, language, latency; `evaluate_parties` for team-vs-party formation. |
+| `types`          | The canonical data model: `PlayerTicket` (now with `party_size`), `RuleSet`, `Rule`, `MatchQualityDetail`, all `*Params`. |
 
 ## What's NOT inside
 
 - Cap'n Proto / RPC / networking
 - Persistence (sled / redb / bincode)
-- Signatures / EIP-712 / Ethereum anything
+- Signature *verification* / EIP-712 / Ethereum anything (keccak256 *hashing* is included for commitments)
 - Async / tokio
+
+## Formal gates
+
+`tests/fuzz_gates.rs` enforces the v2 spec's test matrix:
+- 100,000 randomized party graphs — validation accepts exactly the legal graphs, every accepted party materializes finite aggregates (no panics).
+- Rating-period order-independence — any permutation of the opponent field yields bit-identical `(R', RD', sigma')`.
+- Ladder complementarity — `score(i,j) + score(j,i) = 1` for every pair, ties included.
+- Commitment binding — no collisions across distinct `(address, stake, salt)` triples.
 
 ## Install
 

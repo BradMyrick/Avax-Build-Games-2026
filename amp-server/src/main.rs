@@ -143,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
                 language: "en".into(),
                 max_ping_ms: 150,
                 enqueued_at_ms: joined_ms,
+                party_size: 1,
             },
         });
         rehydrated += 1;

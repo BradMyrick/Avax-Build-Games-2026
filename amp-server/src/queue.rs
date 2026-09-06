@@ -288,6 +288,7 @@ mod tests {
                 language: "en".into(),
                 max_ping_ms: 150,
                 enqueued_at_ms: now_ms(),
+                party_size: 1,
             },
         }
     }

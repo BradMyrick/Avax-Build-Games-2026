@@ -77,6 +77,17 @@ Trust rules for reports: both agree → settled. Conflict → disputed,
 operator arbitrates. Opponent silent past the deadline → reporter's result
 stands. Nobody reports → cancelled, ratings untouched.
 
+## v2: N-player multiplayer (in build)
+
+v2 extends AMP from 1v1 to parties, teams, FFA lobbies (4–16), and battle
+royale (16–64) with dual-deposit escrow (stake + reporting bond), K-of-N
+quorum settlement (`K = ⌊2N/3⌋+1`), early-exit death certificates,
+commit-reveal anti-collusion queueing, and payout profiles. The design
+record — decisions, invariants, and deliberate spec deviations — lives in
+[`docs/design/n-player-v2.md`](docs/design/n-player-v2.md); the N-player
+core primitives are live in `amp-match-core` (`party`, `ladder`, `commit`,
+team/FFA/BR queue topologies), fuzz-gated per the spec's test matrix.
+
 ## The three hard problems — and what ships for each
 
 **Cold-start liquidity.** Empty lobbies kill peer-to-peer matchmaking, so

@@ -108,17 +108,35 @@ pub fn glicko2_update_vs_many(
     let phi = rd as f64 / SCALE;
     let sigma = volatility as f64;
 
-    // Aggregate the period: v = (Σ g²E(1−E))⁻¹, outcome_sum = Σ g(s−E).
-    let mut inv_v = 0.0f64;
-    let mut outcome_sum = 0.0f64;
+    // Aggregate the period: v = (sum of g^2*E*(1-E))^-1,
+    // outcome_sum = sum of g*(s-E). Float addition is not associative, so
+    // the accumulation order is CANONICALIZED (sorted by input bit
+    // patterns) before summing — this is what makes the update
+    // bit-identical under any permutation of the opponent field (the
+    // order-independence gate).
+    let mut terms: Vec<(u128, f64, f64)> = Vec::with_capacity(opponents.len());
     for ((opp_rating, opp_rd), score) in opponents.iter().zip(scores.iter()) {
         let mu_j = (*opp_rating as f64 - 1500.0) / SCALE;
         let phi_j = *opp_rd as f64 / SCALE;
         let g_j = 1.0
             / (1.0 + 3.0 * phi_j * phi_j / (std::f64::consts::PI * std::f64::consts::PI)).sqrt();
         let e_j = 1.0 / (1.0 + (-g_j * (mu - mu_j)).exp());
-        inv_v += g_j * g_j * e_j * (1.0 - e_j);
-        outcome_sum += g_j * (*score as f64 - e_j);
+        let key = ((opp_rating.to_bits() as u128) << 96)
+            | ((opp_rd.to_bits() as u128) << 64)
+            | score.to_bits() as u128;
+        terms.push((
+            key,
+            g_j * g_j * e_j * (1.0 - e_j),
+            g_j * (*score as f64 - e_j),
+        ));
+    }
+    terms.sort_unstable_by_key(|t| t.0);
+
+    let mut inv_v = 0.0f64;
+    let mut outcome_sum = 0.0f64;
+    for (_, v_term, s_term) in &terms {
+        inv_v += *v_term;
+        outcome_sum += *s_term;
     }
     if inv_v <= 0.0 || !inv_v.is_finite() || !outcome_sum.is_finite() {
         return (rating, rd, volatility);
