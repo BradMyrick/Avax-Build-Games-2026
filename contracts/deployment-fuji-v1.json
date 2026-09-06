@@ -7,7 +7,9 @@
     "AMPRegistry": {
       "address": "0xf6B0eA6c88c574c4BbEAdC186AAfe72C43C2cDc2",
       "source": "contracts/src/AMPRegistry.sol",
-      "note": "escrow + game registry + fee-split config (setStudioFee)"
+      "note": "escrow + game registry + fee-split config (setStudioFee)",
+      "verified": true,
+      "verification_provider": "sourcify (exact match)"
     },
     "AMPSettlement": {
       "address": "0x78ec93e66255a74873d20DD62C6595A389272126",
@@ -15,13 +17,17 @@
       "constructor_args": [
         "AMPRegistry@0xf6B0eA6c88c574c4BbEAdC186AAfe72C43C2cDc2"
       ],
-      "note": "verifier-attested + RT hash-agree settlement; studio/protocol fee-split router; combined fee cap 800 bps"
+      "note": "verifier-attested + RT hash-agree settlement; studio/protocol fee-split router; combined fee cap 800 bps",
+      "verified": true,
+      "verification_provider": "sourcify (exact match)"
     }
   },
   "game_registration": {
     "game_id": 0,
     "mode": "ASYNC_VERIFIER",
-    "verifiers": ["0x79aDcEF0E2bdc030f5906aA80C6B50C3712c0064"],
+    "verifiers": [
+      "0x79aDcEF0E2bdc030f5906aA80C6B50C3712c0064"
+    ],
     "min_stake_wei": "1000000000000000",
     "stake_token": "native AVAX",
     "arbiter": "0x95CC495dF579981d3Ffa4a8f77B93A17563E077a",
@@ -34,8 +40,8 @@
     "max_total_fee_bps": 800
   },
   "governance_status": "OPERATOR_OWNED",
-  "governance_note": "v1 baseline is operator-first: both contracts are owned by the deployer EOA (0x95CC...077a). Timelock wrapping is a mainnet milestone, not a beta requirement — the operator also holds the verifier and funded keys.",
-  "deployer_disclosure": "Deployed by the AMP Fuji deployer EOA (0x95CC495dF579981d3Ffa4a8f77B93A17563E077a). An earlier orphaned AMPRegistry at 0x1CDe2Adb845db9f44984464eEe66e1D948DB228c was deployed during a tooling failure and is unwired/empty — do not use it.",
+  "governance_note": "v1 baseline is operator-first: both contracts are owned by the deployer EOA (0x95CC...077a). Timelock wrapping is a mainnet milestone, not a beta requirement \u2014 the operator also holds the verifier and funded keys.",
+  "deployer_disclosure": "Deployed by the AMP Fuji deployer EOA (0x95CC495dF579981d3Ffa4a8f77B93A17563E077a). An earlier orphaned AMPRegistry at 0x1CDe2Adb845db9f44984464eEe66e1D948DB228c was deployed during a tooling failure and is unwired/empty \u2014 do not use it.",
   "legacy": {
     "note": "The pre-fee-split deployments (Registry 0x27E02ebA..., Settlement 0xc1b12a7F..., timelock-governed) and AMPTournamentCup 0x7c743c1c... remain live. The cup is unchanged and still canonical for tournaments; the legacy registry/settlement pair is superseded by this deployment."
   }
