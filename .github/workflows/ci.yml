@@ -42,6 +42,13 @@ jobs:
         with:
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
+      # Belt-and-braces: if submodules ever fail to record (e.g. forked
+      # without gitlinks), fetch the pinned libs directly. Idempotent.
+      - name: Ensure library deps
+        working-directory: contracts
+        run: |
+          [ -d lib/forge-std ] || forge install foundry-rs/forge-std@v1.10.0 --no-git
+          [ -d lib/openzeppelin-contracts ] || forge install OpenZeppelin/openzeppelin-contracts@v5.6.1 --no-git
       - name: Format check (advisory)
         run: forge fmt --check
         working-directory: contracts

@@ -50,7 +50,6 @@ contracts/out/AMPSettlement.sol/*
 !contracts/out/AMPSettlement.sol/AMPSettlement.json
 contracts/cache/
 contracts/broadcast/
-contracts/lib/
 
 # ---- Editor / IDE ----
 .vscode/

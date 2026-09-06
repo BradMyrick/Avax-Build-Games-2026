@@ -3,6 +3,19 @@ import { test } from "vitest";
 import { Tournament, Outcome, TournamentState } from "../index";
 import { writeFileSync, mkdirSync } from "node:fs";
 
+interface ParityPlayer {
+  id: number;
+  seed: number;
+  wallet: string;
+}
+interface ParityCase {
+  n: number;
+  variant: number;
+  players: ParityPlayer[];
+  results: { matchId: number; outcome: string }[];
+  winnerWallets: string[];
+}
+
 function mulberry32(a: number) {
   return function () {
     a |= 0; a = (a + 0x6d2b79f5) | 0;
@@ -13,7 +26,7 @@ function mulberry32(a: number) {
 }
 
 test("generate parity fixtures", () => {
-  const cases: any[] = [];
+  const cases: ParityCase[] = [];
   for (const n of [2, 3, 4, 5, 6, 8, 9, 12, 16]) {
     for (let variant = 0; variant < 4; variant++) {
       const rng = mulberry32(n * 1000 + variant);
