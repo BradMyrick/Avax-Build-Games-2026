@@ -688,7 +688,6 @@ export default function ArenaPage() {
         {phase === "playing" && matchView && (
           <QuickDraw
             opponentName={matchView.opponent.wallet}
-            opponentRating={matchView.opponent.rating}
             isBot={matchView.bot ?? false}
             onFinish={handleGameFinish}
           />

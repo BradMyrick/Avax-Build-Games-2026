@@ -31,7 +31,6 @@ function randomBetween(min: number, max: number) {
 
 export interface QuickDrawProps {
   opponentName: string;
-  opponentRating: number;
   isBot: boolean;
   onFinish: (result: { won: boolean; roundsWon: number; avgReactionMs: number }) => void;
 }
