@@ -253,26 +253,47 @@ export default function ArenaPage() {
     (r) => selected && r.gameId === selected.gameId && r.rulesetId === selected.rulesetId,
   );
 
+  // Developer-only diagnostic — never rendered to visitors.
+  if (typeof window !== "undefined" && matchmakerMisconfigured()) {
+    console.error(
+      `[AMP] Matchmaker misconfigured: build targets ${AMP_SERVER_URL}. ` +
+        "Set NEXT_PUBLIC_AMP_SERVER_URL before the next build.",
+    );
+  }
+
+  const misconfigured =
+    typeof window !== "undefined" && matchmakerMisconfigured();
+
   return (
     <div className="min-h-screen bg-black text-white antialiased">
       <div className="absolute top-0 -left-1/4 w-[150%] h-[400px] bg-brand-cyan/10 blur-[120px] rounded-full pointer-events-none" />
       <div className="absolute bottom-0 -right-1/4 w-[150%] h-[400px] bg-brand-red/10 blur-[120px] rounded-full pointer-events-none" />
 
       <div className="relative z-10 max-w-3xl mx-auto px-6 py-12">
-        {/* Build-time configuration failure: the site shipped with the
-            localhost fallback for the matchmaker URL. */}
-        {matchmakerMisconfigured() && (
-          <div className="mb-6 rounded-2xl border border-brand-red/40 bg-brand-red/10 px-5 py-4 text-sm text-red-200">
-            <p className="font-bold mb-1">Matchmaker not configured</p>
-            <p className="text-red-200/90">
-              This build points at <code>{AMP_SERVER_URL}</code>. Set{" "}
-              <code>NEXT_PUBLIC_AMP_SERVER_URL</code> to your deployed
-              amp-server URL in your hosting provider and <strong>trigger a
-              rebuild</strong> (the variable is embedded at build time).
+        {/* Misconfigured build: visitors see a clean coming-soon page;
+            the technical detail is in the browser console only. */}
+        {misconfigured && (
+          <div className="glass-panel rounded-3xl border border-brand-cyan/20 p-10 text-center">
+            <span className="inline-block rounded-full border border-yellow-400/40 bg-yellow-400/10 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-yellow-400 mb-4">
+              Coming Soon
+            </span>
+            <h2 className="text-2xl font-black uppercase tracking-tight mb-3">
+              Ranked matchmaking is almost here
+            </h2>
+            <p className="text-zinc-400 max-w-md mx-auto">
+              The arena is being prepared. Check back soon to connect your
+              wallet, queue up, and climb the ladder.
             </p>
+            <Link
+              href="/"
+              className="inline-flex items-center gap-2 mt-6 text-sm text-brand-cyan hover:underline"
+            >
+              Back to home
+            </Link>
           </div>
         )}
-
+        {!misconfigured && (
+          <>
         {/* Header */}
         <div className="flex items-center justify-between mb-10">
           <Link href="/" className="flex items-center gap-3 group">
@@ -611,6 +632,8 @@ export default function ArenaPage() {
               arbitration — you will be notified here when it resolves.
             </p>
           </div>
+        )}
+          </>
         )}
       </div>
     </div>

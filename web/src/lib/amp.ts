@@ -92,13 +92,15 @@ async function api<T>(
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     });
   } catch {
+    console.error(
+      `[AMP] Matchmaker unreachable at ${SERVER_URL}.` +
+        (matchmakerMisconfigured()
+          ? " Build is missing NEXT_PUBLIC_AMP_SERVER_URL (set it and rebuild)."
+          : ""),
+    );
     throw new ApiError(
       "network",
-      `Could not reach the matchmaker at ${SERVER_URL}. ${
-        matchmakerMisconfigured()
-          ? "This site was built without NEXT_PUBLIC_AMP_SERVER_URL — set it and redeploy."
-          : "Check that the AMP matchmaker is online."
-      }`,
+      "Matchmaking is temporarily unavailable. Please try again shortly.",
       0,
     );
   }
