@@ -8,6 +8,7 @@ FROM rust:1.97 AS builder
 WORKDIR /amp
 COPY Cargo.toml Cargo.lock ./
 COPY amp-match-core/ ./amp-match-core/
+COPY relayer/ ./relayer/
 COPY amp-server/ ./amp-server/
 COPY migrations/ ./migrations/
 RUN cargo build --release -p amp-server
