@@ -46,13 +46,22 @@ web/ (Next.js)                    amp-server (Rust)                    contracts
   `relayer_jobs` from Postgres and submits on Fuji: tournament
   fund/finalize + match `settle_match`.
 - **`contracts/` (Foundry)** — `AMPRegistry` + `AMPSettlement` (staked
-  matches, verifier-gated payouts, bps protocol fee, arbiter disputes) and
-  `AMPTournamentCup` (sponsor prize pools) — all deployed and verified on
-  Fuji, timelock-governed.
+  matches, verifier-gated payouts, studio/protocol fee-split router, arbiter
+  disputes) and `AMPTournamentCup` (sponsor prize pools) — all deployed on
+  Fuji. Manifests: `contracts/deployment-fuji-v1.json` (v1 1v1 baseline,
+  operator-owned) and `contracts/deployment-fuji.json` (legacy, timelocked).
 - **`web/` (Next.js)** — `/arena` player client (login → queue → match →
   report → rating) plus the tournament product surface (`/setup`, `/manage`,
   `/cup`, `/claim`).
 - **`migrations/`** — one Postgres schema for everything.
+
+## Deployed contracts (Fuji)
+
+| Contract | Address | Role |
+|:---|:---|:---|
+| `AMPRegistry` (v1) | [`0xf6B0eA6c88c574c4BbEAdC186AAfe72C43C2cDc2`](https://testnet.snowtrace.io/address/0xf6B0eA6c88c574c4BbEAdC186AAfe72C43C2cDc2) | Escrow, game registry, fee-split config — game 0: ASYNC_VERIFIER, native AVAX |
+| `AMPSettlement` (v1) | [`0x78ec93e66255a74873d20DD62C6595A389272126`](https://testnet.snowtrace.io/address/0x78ec93e66255a74873d20DD62C6595A389272126) | Settlement: verifier-attested + RT hash-agree, fee-split router (≤800 bps total) |
+| `AMPTournamentCup` | [`0x7c743c1c9ae3e7a65d030098f2249b7787d66dff`](https://testnet.snowtrace.io/address/0x7c743c1c9ae3e7a65d030098f2249b7787d66dff) | Sponsor prize pools, EIP-712 finalization, pull-claims (unchanged) |
 
 ## The player flow
 

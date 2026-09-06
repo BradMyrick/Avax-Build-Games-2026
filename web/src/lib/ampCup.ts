@@ -88,25 +88,26 @@ export async function connectWallet(): Promise<ethers.BrowserProvider> {
         method: "wallet_switchEthereumChain",
         params: [{ chainId: chainIdHex }],
       });
-    } catch (switchError: any) {
+    } catch (switchError) {
       // 4902 = chain not added to wallet; add it.
-      if (switchError.code === 4902 || switchError.code === -32603) {
+      const code = (switchError as { code?: number })?.code;
+      if (code === 4902 || code === -32603) {
         await ethereum.request({
           method: "wallet_addEthereumChain",
           params: [{
             chainId: chainIdHex,
-            chainName: "Avalanche Fuji Testnet",
+            chainName: "Avalanche Fuji C-Chain",
             nativeCurrency: { name: "AVAX", symbol: "AVAX", decimals: 18 },
-            rpcUrls: ["https://api.avax-test.network/ext/bc/C/rpc"],
-            blockExplorerUrls: ["https://testnet.snowtrace.io"],
+            rpcUrls: [FUJI_RPC],
+            blockExplorerUrls: [EXPLORER_URL],
           }],
         });
       } else {
-        throw new Error(`Could not switch to Fuji testnet: ${switchError.message}`);
+        const msg = (switchError as { message?: string })?.message ?? "unknown error";
+        throw new Error(`Could not switch to Fuji testnet: ${msg}`);
       }
     }
-    // Re-check after the switch/add.
-    await provider._detectNetwork?.();
+    // Re-check after the switch/add (fresh call re-derives the network).
     const newNet = await provider.getNetwork();
     if (Number(newNet.chainId) !== FUJI_CHAIN_ID) {
       throw new Error("Please switch your wallet to the Avalanche Fuji testnet and try again.");

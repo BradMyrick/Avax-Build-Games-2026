@@ -40,9 +40,8 @@ impl Config {
             )?,
             settlement_address: read_env(
                 "AMP_SETTLEMENT_ADDRESS",
-                // Deployed + timelock-governed on Fuji; see
-                // contracts/deployment-fuji.json
-                "0xc1b12a7Ffad6CeFf045064f9fE3E8879F0F3c9eD",
+                // v1 1v1 baseline on Fuji; see contracts/deployment-fuji-v1.json
+                "0x78ec93e66255a74873d20DD62C6595A389272126",
             )?,
             poll_idle_ms: read_env("AMP_POLL_IDLE_MS", "3000")?
                 .parse()
