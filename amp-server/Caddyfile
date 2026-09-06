@@ -1,0 +1,10 @@
+# Caddy reverse proxy for the AMP matchmaker.
+# Set AMP_HOST to your domain (DNS A record → this host), e.g.:
+#   amp.playwithamp.xyz
+{
+	email admin@playwithamp.xyz
+}
+
+{$AMP_HOST} {
+	reverse_proxy amp-server:8080
+}
